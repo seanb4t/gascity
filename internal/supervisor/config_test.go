@@ -335,7 +335,25 @@ func TestSecretsConfig_Validate(t *testing.T) {
 			cfg: SecretsConfig{
 				Keychain: KeychainBackendConfig{Prefixes: []string{"1FOO"}},
 			},
-			wantErr: true,
+			wantErr:   true,
+			errSubstr: "valid env-var name",
+		},
+		{
+			name: "empty string prefix rejected",
+			cfg: SecretsConfig{
+				Keychain: KeychainBackendConfig{Prefixes: []string{""}},
+			},
+			wantErr:   true,
+			errSubstr: "valid env-var name",
+		},
+		{
+			name: "file backend rejects whitespace-only dir",
+			cfg: SecretsConfig{
+				Backend: "file",
+				File:    FileBackendConfig{Dir: "   ", Prefixes: []string{"EXA_API_KEY"}},
+			},
+			wantErr:   true,
+			errSubstr: "dir",
 		},
 		{
 			name: "file backend requires dir",

@@ -139,7 +139,7 @@ prefixes = ["EXA_API_KEY", "FIRECRAWL_", "LINEAR_TOKEN"]
 
 ### Validation
 
-Implemented as `func (c SecretsConfig) Validate() error` in `internal/supervisor/config.go`. Fail-fast at config-load time, not at Keychain query time.
+Implemented as `func (c SecretsConfig) Validate(reservedKey func(string) bool) error` in `internal/supervisor/config.go`. The `reservedKey` predicate is injected by the caller (cmd/gc passes its `isReservedSupervisorEnvKey`) to avoid an `internal/supervisor` → `cmd/gc` import cycle. Same-package tests pass `nil`, which falls back to a minimal default recognizing only `PATH` and `GC_HOME`. Fail-fast at config-load time, not at Keychain query time.
 
 | Rule | Error |
 |---|---|
