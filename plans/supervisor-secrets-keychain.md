@@ -41,6 +41,165 @@
 
 ---
 
+## Pre-Task: Switch goreleaser to CGo-enabled cross-compilation
+
+**Files:**
+- Modify: `.goreleaser.yml`
+- Modify: `.github/workflows/release.yml` (replace goreleaser-action with goreleaser-cross docker run)
+- Modify: `.github/workflows/rc-gate.yml` (same)
+- Leave alone: `.github/workflows/ci.yml` (only runs `goreleaser check`, no build — no CGo needed)
+
+**Why this task is here:** the secrets feature depends on `99designs/keyring`, whose macOS Keychain backend requires CGo (Apple Security framework) and whose Linux Secret Service backend requires CGo + libdbus. Today's release pipeline builds with `CGO_ENABLED=0` (`.goreleaser.yml:7`), so Homebrew users would receive a binary that loads the new code paths but cannot actually use Keychain or Secret Service. Released binary would be hollow. Fix the release pipeline before shipping the feature.
+
+**Approach:** switch from the `goreleaser/goreleaser-action` GitHub Action to the official `ghcr.io/goreleaser/goreleaser-cross` Docker image, which bundles `osxcross` (linux→darwin clang), Linux cross-gcc toolchains, and goreleaser itself. The `.goreleaser.yml` uses per-target `overrides` to set `CC`/`CXX` for each os/arch combo.
+
+- [ ] **Step 1: Inventory current goreleaser invocations**
+
+Run: `grep -rln 'goreleaser-action' .github/workflows/`
+Expected: `release.yml`, `rc-gate.yml` (and `ci.yml`, but ci.yml runs `goreleaser check` only — leave alone).
+
+- [ ] **Step 2: Pick a goreleaser-cross version**
+
+The current goreleaser-action uses `version: "~> v2"`. Pick the latest `ghcr.io/goreleaser/goreleaser-cross:v2.x.y` tag that exists on https://github.com/goreleaser/goreleaser-cross/pkgs/container/goreleaser-cross. Verify by `docker pull ghcr.io/goreleaser/goreleaser-cross:<tag>`. Pin to that exact tag (no `latest`).
+
+- [ ] **Step 3: Update `.goreleaser.yml` to use CGo with per-target overrides**
+
+Replace the existing `builds:` block (line 3-15) with:
+
+```yaml
+builds:
+  - main: ./cmd/gc
+    binary: gc
+    env:
+      - CGO_ENABLED=1
+    ldflags:
+      - -s -w -X main.version={{ .Tag }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CC=x86_64-linux-gnu-gcc
+          - CXX=x86_64-linux-gnu-g++
+      - goos: linux
+        goarch: arm64
+        env:
+          - CC=aarch64-linux-gnu-gcc
+          - CXX=aarch64-linux-gnu-g++
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CC=o64-clang
+          - CXX=o64-clang++
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CC=oa64-clang
+          - CXX=oa64-clang++
+```
+
+- [ ] **Step 4: Validate `.goreleaser.yml` syntax locally**
+
+Run: `docker run --rm -v "$PWD:/work" -w /work ghcr.io/goreleaser/goreleaser-cross:<tag> check`
+Expected: exit 0 with "valid configuration".
+
+- [ ] **Step 5: Run a snapshot build locally**
+
+Run: `docker run --rm -v "$PWD:/work" -w /work ghcr.io/goreleaser/goreleaser-cross:<tag> release --snapshot --clean --skip=publish,announce,sign,sbom`
+Expected: produces `dist/gc_*` binaries for all four os/arch combos. Verify by `file dist/gascity_*_darwin_arm64*/gc` shows "Mach-O 64-bit executable arm64".
+
+If Docker isn't available locally, skip Step 5 and rely on CI for first verification. Note the skip in the commit body.
+
+- [ ] **Step 6: Update `.github/workflows/release.yml` (Run GoReleaser step)**
+
+Replace lines 45-54 (the `Run GoReleaser` step) with:
+
+```yaml
+      - name: Run GoReleaser
+        run: |
+          docker run \
+            --rm \
+            -e GITHUB_TOKEN \
+            -e GORELEASER_CURRENT_TAG \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/go/src/github.com/gastownhall/gascity" \
+            -w /go/src/github.com/gastownhall/gascity \
+            ghcr.io/goreleaser/goreleaser-cross:<tag> \
+            release --clean ${{ github.repository != 'gastownhall/gascity' && '--skip=publish --skip=announce' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+```
+
+Replace `<tag>` with the version chosen in Step 2.
+
+- [ ] **Step 7: Update `.github/workflows/rc-gate.yml` (Run GoReleaser snapshot step)**
+
+Replace the `Run GoReleaser snapshot` step (around line 362) with:
+
+```yaml
+      - name: Run GoReleaser snapshot
+        run: |
+          docker run \
+            --rm \
+            -v "$PWD:/go/src/github.com/gastownhall/gascity" \
+            -w /go/src/github.com/gastownhall/gascity \
+            ghcr.io/goreleaser/goreleaser-cross:<tag> \
+            release --snapshot --clean
+```
+
+- [ ] **Step 8: Update the design doc**
+
+In `engdocs/design/supervisor-secrets-v0.md`, after the existing "Non-goals (v1)" section, insert a new "## Distribution constraints" section:
+
+```markdown
+## Distribution constraints
+
+This feature requires CGo on every supported platform:
+
+- **macOS**: `99designs/keyring` Keychain backend links against Apple's Security framework.
+- **Linux**: Secret Service backend links against libdbus.
+- **Windows**: WinCred backend uses `syscall` only and does not strictly require CGo, but the build is consistent across platforms.
+
+Pre-feature, gc shipped as a pure-Go (`CGO_ENABLED=0`) binary via goreleaser. This feature requires switching the release pipeline to CGo cross-compilation using `ghcr.io/goreleaser/goreleaser-cross`, which bundles `osxcross` and Linux cross-gcc toolchains.
+
+The change is one-time infrastructure work — see Pre-Task in `plans/supervisor-secrets-keychain.md`. After this switch, every gc release is CGo-enabled across all platforms.
+
+**Trade-off accepted:** release artifact size grows modestly (~10-20%) due to libsystem linkage; release pipeline run time increases from ~3 min to ~10 min due to docker image pull and cross-compile overhead. Both costs are acceptable to keep the in-process-keyring design instead of pivoting to subprocess shelling.
+```
+
+- [ ] **Step 9: Run all CI-affecting tests locally**
+
+Run: `make test`
+Expected: PASS (no behavior change in app code).
+
+- [ ] **Step 10: Commit**
+
+```
+git add .goreleaser.yml .github/workflows/release.yml .github/workflows/rc-gate.yml engdocs/design/supervisor-secrets-v0.md
+git commit -m "build: switch goreleaser to CGo-enabled cross-compilation
+
+The supervisor-secrets-v0 feature requires CGo for the macOS Keychain
+backend (Apple Security framework) and the Linux Secret Service
+backend (libdbus). Switches release.yml and rc-gate.yml from the
+goreleaser-action to the goreleaser-cross Docker image, which bundles
+osxcross and Linux cross-gcc toolchains.
+
+ci.yml (goreleaser check only) is unchanged — no build performed.
+
+Trade-offs documented in engdocs/design/supervisor-secrets-v0.md
+under 'Distribution constraints'.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
 ## Task 1: Add `99designs/keyring` dependency
 
 **Files:**
