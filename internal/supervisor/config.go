@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ func isTestBinary() bool {
 type Config struct {
 	Supervisor  Section           `toml:"supervisor"`
 	Publication PublicationConfig `toml:"publication,omitempty"`
+	Secrets     SecretsConfig     `toml:"secrets,omitempty"`
 }
 
 // Section holds the [supervisor] table fields.
@@ -265,4 +267,99 @@ func reserveLoopbackPort() (int, error) {
 		return 0, fmt.Errorf("unexpected supervisor listener address %T", lis.Addr())
 	}
 	return addr.Port, nil
+}
+
+// SecretsConfig declares which secrets the supervisor loads at startup
+// and how to source them. See engdocs/design/supervisor-secrets-v0.md.
+type SecretsConfig struct {
+	// Backend selects the secret store. One of: "auto", "keychain",
+	// "secret-service", "file", "pass". Empty defaults to "auto", which
+	// picks the platform-native backend (keychain on macOS,
+	// secret-service on Linux, wincred on Windows).
+	Backend string `toml:"backend,omitempty"`
+
+	Keychain KeychainBackendConfig `toml:"keychain,omitempty"`
+	File     FileBackendConfig     `toml:"file,omitempty"`
+}
+
+// KeychainBackendConfig configures the keyring abstraction for
+// platform-native backends (macOS Keychain, Linux Secret Service,
+// Windows Credential Manager). The same struct serves all three;
+// 99designs/keyring abstracts platform differences.
+type KeychainBackendConfig struct {
+	// ServiceName is the umbrella identifier under which secrets are
+	// stored. Defaults to "gc-supervisor".
+	ServiceName string `toml:"service_name,omitempty"`
+
+	// Account is the keyring item account field. Defaults to
+	// "$USER@personal" at load time.
+	Account string `toml:"account,omitempty"`
+
+	// Prefixes is the list of service-name prefixes to load. Each entry
+	// matches keyring items whose Key starts with the prefix. Exact
+	// env-var names work as one-result prefixes.
+	Prefixes []string `toml:"prefixes"`
+}
+
+// FileBackendConfig configures the encrypted-file backend. Used for
+// tests, headless deploys, and CI.
+type FileBackendConfig struct {
+	// Dir is the directory where encrypted secret files are stored.
+	// Required when Backend = "file".
+	Dir string `toml:"dir"`
+
+	// Prefixes — same semantics as KeychainBackendConfig.Prefixes.
+	Prefixes []string `toml:"prefixes"`
+}
+
+var validSecretBackends = map[string]bool{
+	"":               true, // empty == auto
+	"auto":           true,
+	"keychain":       true,
+	"secret-service": true,
+	"file":           true,
+	"pass":           true,
+	"wincred":        true,
+}
+
+// envVarNameRE matches POSIX env-var names. Mirrors
+// supervisorServiceEnvNameRE in cmd/gc/cmd_supervisor_lifecycle.go;
+// kept here to avoid an import cycle.
+var envVarNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+// Validate checks the configuration for shape errors. The
+// reservedKey predicate is injected by the caller (cmd/gc passes
+// isReservedSupervisorEnvKey); when nil, a minimal default that
+// recognizes only PATH and GC_HOME is used.
+func (c SecretsConfig) Validate(reservedKey func(string) bool) error {
+	if !validSecretBackends[c.Backend] {
+		return fmt.Errorf("secrets.backend: unknown value %q (allowed: auto, keychain, secret-service, file, pass, wincred)", c.Backend)
+	}
+	if reservedKey == nil {
+		reservedKey = func(name string) bool {
+			return name == "PATH" || name == "GC_HOME"
+		}
+	}
+	if err := validatePrefixList("secrets.keychain.prefixes", c.Keychain.Prefixes, reservedKey); err != nil {
+		return err
+	}
+	if err := validatePrefixList("secrets.file.prefixes", c.File.Prefixes, reservedKey); err != nil {
+		return err
+	}
+	if c.Backend == "file" && strings.TrimSpace(c.File.Dir) == "" {
+		return fmt.Errorf("secrets.file.dir: required when backend = \"file\"")
+	}
+	return nil
+}
+
+func validatePrefixList(label string, prefixes []string, reservedKey func(string) bool) error {
+	for i, p := range prefixes {
+		if !envVarNameRE.MatchString(p) {
+			return fmt.Errorf("%s[%d]: %q is not a valid env-var name (must match [A-Z_][A-Z0-9_]*)", label, i, p)
+		}
+		if reservedKey(p) {
+			return fmt.Errorf("%s[%d]: %q would shadow reserved env var", label, i, p)
+		}
+	}
+	return nil
 }
