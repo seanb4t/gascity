@@ -313,7 +313,7 @@ type FileBackendConfig struct {
 }
 
 var validSecretBackends = map[string]bool{
-	"":               true, // empty == auto
+	"":               true, // empty string treated as "auto" — supports unset toml field
 	"auto":           true,
 	"keychain":       true,
 	"secret-service": true,
@@ -322,9 +322,12 @@ var validSecretBackends = map[string]bool{
 	"wincred":        true,
 }
 
-// envVarNameRE matches POSIX env-var names. Mirrors
-// supervisorServiceEnvNameRE in cmd/gc/cmd_supervisor_lifecycle.go;
-// kept here to avoid an import cycle.
+// envVarNameRE matches uppercase POSIX env-var names. Stricter than
+// supervisorServiceEnvNameRE (cmd/gc/cmd_supervisor_lifecycle.go:381),
+// which is case-insensitive. The tighter rule here reflects that
+// secret prefixes should follow POSIX convention (uppercase only) —
+// users who type lowercase prefixes get a fast-fail at config-load
+// time rather than silent zero-match at keyring-enumerate time.
 var envVarNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 // Validate checks the configuration for shape errors. The
