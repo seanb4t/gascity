@@ -714,6 +714,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		}
 	}
 
+	// supCfgMu protects supCfg from concurrent SIGHUP-handler writes vs.
+	// reconcile-loop reads. The mutex is function-local; the goroutine below
+	// captures it via closure.
+	var supCfgMu sync.RWMutex
+
 	// SIGHUP triggers config + secrets reload. Children spawned before
 	// the HUP retain their env (Unix process env is immutable post-spawn);
 	// future spawns inherit the new values.
@@ -735,10 +740,13 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			}
 			// Backend swap requires restart; warn and keep going with the
 			// existing backend by ignoring backend changes.
-			if newCfg.Secrets.Backend != supCfg.Secrets.Backend {
+			supCfgMu.RLock()
+			prevBackend := supCfg.Secrets.Backend
+			supCfgMu.RUnlock()
+			if newCfg.Secrets.Backend != prevBackend {
 				fmt.Fprintf(stderr, "supervisor: SIGHUP: WARN: backend change %q -> %q ignored; restart to apply\n",
-					supCfg.Secrets.Backend, newCfg.Secrets.Backend) //nolint:errcheck
-				newCfg.Secrets.Backend = supCfg.Secrets.Backend
+					prevBackend, newCfg.Secrets.Backend) //nolint:errcheck
+				newCfg.Secrets.Backend = prevBackend
 			}
 			rr, err := secretsLoader.Reload(context.Background(), newCfg.Secrets)
 			if err != nil {
@@ -749,7 +757,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 				rr.Added, rr.Updated, rr.Removed) //nolint:errcheck
 			// Replace cfg in scope so subsequent reloads diff against the
 			// most recent values.
+			supCfgMu.Lock()
 			supCfg = newCfg
+			supCfgMu.Unlock()
 		}
 	}()
 
@@ -766,10 +776,12 @@ func runSupervisor(stdout, stderr io.Writer) int {
 
 	// Start API server with city-namespaced routing (Phase 2).
 	startedAt := time.Now()
+	supCfgMu.RLock()
 	bind := supCfg.Supervisor.BindOrDefault()
 	port := supCfg.Supervisor.PortOrDefault()
 	nonLocal := bind != "127.0.0.1" && bind != "localhost" && bind != "::1"
 	readOnly := nonLocal && !supCfg.Supervisor.AllowMutations
+	supCfgMu.RUnlock()
 	if readOnly {
 		fmt.Fprintf(stderr, "gc supervisor: binding to %s — mutation endpoints disabled (non-localhost)\n", bind) //nolint:errcheck
 	}
@@ -850,7 +862,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "Supervisor started.") //nolint:errcheck
 
 	// Reconciliation loop.
+	supCfgMu.RLock()
 	interval := supCfg.Supervisor.PatrolIntervalDuration()
+	supCfgMu.RUnlock()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -862,7 +876,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "gc supervisor: reconcile panicked: %v\n", r) //nolint:errcheck
 			}
 		}()
-		reconcileCities(reg, registry, supCfg.Publication, stdout, stderr)
+		supCfgMu.RLock()
+		pub := supCfg.Publication
+		supCfgMu.RUnlock()
+		reconcileCities(reg, registry, pub, stdout, stderr)
 	}
 
 	// Initial reconcile.
