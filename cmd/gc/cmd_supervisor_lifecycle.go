@@ -894,6 +894,18 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 	"XDG_RUNTIME_DIR":                     true,
 }
 
+// IsReservedSupervisorEnvKey reports whether name is an env var the
+// supervisor itself controls (fixed keys like GC_HOME) or auto-persists
+// from the install-time shell (HOME, USER, SHELL, etc). Such keys MUST
+// NOT be redefined by user-supplied mechanisms (GC_SUPERVISOR_ENV opt-in
+// list, [secrets.keychain] prefixes, etc).
+func IsReservedSupervisorEnvKey(name string) bool {
+	if supervisorServiceFixedEnvKeys[name] {
+		return true
+	}
+	return supervisorServiceEnvKeys[name]
+}
+
 func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	env := make(map[string]string)
 	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
@@ -981,7 +993,7 @@ func supervisorServiceExplicitEnvKeys(raw string) []string {
 	seen := make(map[string]bool, len(fields))
 	for _, field := range fields {
 		key := strings.TrimSpace(field)
-		if key == "" || seen[key] || !supervisorServiceEnvNameRE.MatchString(key) || supervisorServiceFixedEnvKeys[key] {
+		if key == "" || seen[key] || !supervisorServiceEnvNameRE.MatchString(key) || IsReservedSupervisorEnvKey(key) {
 			continue
 		}
 		seen[key] = true
