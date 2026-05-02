@@ -129,3 +129,85 @@ func equalStringSlices(a, b []string) bool {
 	return true
 }
 
+func TestReload_AddedUpdatedRemoved(t *testing.T) {
+	scrubEnv(t, "EXA_API_KEY", "FIRECRAWL_KEY", "LINEAR_TOKEN")
+	cfg := seedFileKeyring(t, []string{"EXA_API_KEY", "FIRECRAWL_KEY", "LINEAR_"}, map[string]string{
+		"EXA_API_KEY":  "v1",
+		"LINEAR_TOKEN": "tok-v1",
+	})
+	loader := NewLoader(fixedFilePrompt())
+	if _, err := loader.LoadAll(context.Background(), cfg); err != nil {
+		t.Fatalf("initial LoadAll: %v", err)
+	}
+	if os.Getenv("EXA_API_KEY") != "v1" {
+		t.Fatalf("setup: EXA_API_KEY = %q, want v1", os.Getenv("EXA_API_KEY"))
+	}
+
+	// Mutate the keyring underneath the loader.
+	ring, err := openKeyring(cfg, fixedFilePrompt())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("v2")}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := ring.Set(keyring.Item{Key: "FIRECRAWL_KEY", Data: []byte("new")}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := ring.Remove("LINEAR_TOKEN"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	rr, err := loader.Reload(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	if os.Getenv("EXA_API_KEY") != "v2" {
+		t.Errorf("after reload: EXA_API_KEY = %q, want v2", os.Getenv("EXA_API_KEY"))
+	}
+	if os.Getenv("FIRECRAWL_KEY") != "new" {
+		t.Errorf("after reload: FIRECRAWL_KEY = %q, want new", os.Getenv("FIRECRAWL_KEY"))
+	}
+	if v, ok := os.LookupEnv("LINEAR_TOKEN"); ok {
+		t.Errorf("after reload: LINEAR_TOKEN = %q (still set), want unset", v)
+	}
+
+	if !contains(rr.Updated, "EXA_API_KEY") {
+		t.Errorf("Updated = %v, want to contain EXA_API_KEY", rr.Updated)
+	}
+	if !contains(rr.Added, "FIRECRAWL_KEY") {
+		t.Errorf("Added = %v, want to contain FIRECRAWL_KEY", rr.Added)
+	}
+	if !contains(rr.Removed, "LINEAR_TOKEN") {
+		t.Errorf("Removed = %v, want to contain LINEAR_TOKEN", rr.Removed)
+	}
+}
+
+func TestReload_Idempotent(t *testing.T) {
+	scrubEnv(t, "EXA_API_KEY")
+	cfg := seedFileKeyring(t, []string{"EXA_API_KEY"}, map[string]string{
+		"EXA_API_KEY": "v1",
+	})
+	loader := NewLoader(fixedFilePrompt())
+	if _, err := loader.LoadAll(context.Background(), cfg); err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	rr, err := loader.Reload(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if len(rr.Added)+len(rr.Updated)+len(rr.Removed) != 0 {
+		t.Errorf("idempotent reload had changes: %+v", rr)
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+

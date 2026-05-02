@@ -101,6 +101,93 @@ func loaderPrefixes(cfg supervisor.SecretsConfig) []string {
 	return cfg.Keychain.Prefixes
 }
 
+// ReloadResult extends Result with diff information showing what
+// changed since the previous LoadAll/Reload call.
+type ReloadResult struct {
+	Result
+	Added   []string // env vars set this reload that weren't set before
+	Updated []string // env vars whose values changed
+	Removed []string // env vars unset this reload (not in keyring anymore)
+}
+
+// Reload re-enumerates the keyring and reconciles env state. Keys
+// removed from the keyring since the last load are os.Unsetenv'd;
+// new and changed keys are os.Setenv'd. Reload is idempotent.
+func (l *Loader) Reload(ctx context.Context, cfg supervisor.SecretsConfig) (ReloadResult, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	rr := ReloadResult{}
+
+	ring, err := openKeyring(cfg, l.prompt)
+	if err != nil {
+		return rr, err
+	}
+
+	keys, err := ring.Keys()
+	if err != nil {
+		return rr, fmt.Errorf("listing keyring keys: %w", err)
+	}
+
+	prefixes := loaderPrefixes(cfg)
+	nextSet := make(map[string]struct{})
+
+	for _, prefix := range prefixes {
+		matches := filterByPrefix(keys, prefix)
+		if len(matches) == 0 {
+			rr.Missing = append(rr.Missing, prefix)
+			continue
+		}
+		for _, key := range matches {
+			item, err := ring.Get(key)
+			if err != nil {
+				rr.Errors = append(rr.Errors, fmt.Errorf("get %s: %w", key, err))
+				continue
+			}
+			if len(item.Data) == 0 {
+				rr.Skipped = append(rr.Skipped, key)
+				continue
+			}
+			newVal := string(item.Data)
+			oldVal, hadBefore := os.LookupEnv(key)
+			os.Setenv(key, newVal)
+			rr.Set = append(rr.Set, key)
+			nextSet[key] = struct{}{}
+
+			switch {
+			case !hadBefore || !l.wasInLastSet(key):
+				rr.Added = append(rr.Added, key)
+			case oldVal != newVal:
+				rr.Updated = append(rr.Updated, key)
+			}
+		}
+	}
+
+	// Remove env vars that were set on previous load but no longer
+	// appear in the keyring.
+	for key := range l.lastSet {
+		if _, stillPresent := nextSet[key]; stillPresent {
+			continue
+		}
+		os.Unsetenv(key)
+		rr.Removed = append(rr.Removed, key)
+	}
+
+	sort.Strings(rr.Set)
+	sort.Strings(rr.Missing)
+	sort.Strings(rr.Skipped)
+	sort.Strings(rr.Added)
+	sort.Strings(rr.Updated)
+	sort.Strings(rr.Removed)
+	l.lastSet = nextSet
+	return rr, nil
+}
+
+func (l *Loader) wasInLastSet(key string) bool {
+	_, ok := l.lastSet[key]
+	return ok
+}
+
 // filterByPrefix returns all keys that have the given prefix, sorted.
 func filterByPrefix(keys []string, prefix string) []string {
 	out := make([]string, 0)
