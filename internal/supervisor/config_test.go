@@ -293,6 +293,84 @@ func TestDefaultHomePanicsWithoutGCHome(t *testing.T) {
 	DefaultHome()
 }
 
+func TestSecretsConfig_Validate(t *testing.T) {
+	cases := []struct {
+		name      string
+		cfg       SecretsConfig
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:    "empty is valid (defaults to auto)",
+			cfg:     SecretsConfig{},
+			wantErr: false,
+		},
+		{
+			name: "auto backend is valid",
+			cfg:  SecretsConfig{Backend: "auto"},
+		},
+		{
+			name: "keychain backend with valid prefixes",
+			cfg: SecretsConfig{
+				Backend:  "keychain",
+				Keychain: KeychainBackendConfig{Prefixes: []string{"EXA_API_KEY", "LINEAR_"}},
+			},
+		},
+		{
+			name:      "unknown backend rejected",
+			cfg:       SecretsConfig{Backend: "vault"},
+			wantErr:   true,
+			errSubstr: "unknown",
+		},
+		{
+			name: "lowercase prefix rejected",
+			cfg: SecretsConfig{
+				Keychain: KeychainBackendConfig{Prefixes: []string{"exa_api_key"}},
+			},
+			wantErr:   true,
+			errSubstr: "valid env-var name",
+		},
+		{
+			name: "prefix starting with digit rejected",
+			cfg: SecretsConfig{
+				Keychain: KeychainBackendConfig{Prefixes: []string{"1FOO"}},
+			},
+			wantErr: true,
+		},
+		{
+			name: "file backend requires dir",
+			cfg: SecretsConfig{
+				Backend: "file",
+				File:    FileBackendConfig{Prefixes: []string{"EXA_API_KEY"}},
+			},
+			wantErr:   true,
+			errSubstr: "dir",
+		},
+		{
+			name: "file backend with dir is valid",
+			cfg: SecretsConfig{
+				Backend: "file",
+				File:    FileBackendConfig{Dir: t.TempDir(), Prefixes: []string{"EXA_API_KEY"}},
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.cfg.Validate(nil) // nil reservedKey func uses internal default
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("Validate() = nil, want error containing %q", c.errSubstr)
+				}
+				if c.errSubstr != "" && !strings.Contains(err.Error(), c.errSubstr) {
+					t.Fatalf("Validate() = %v, want error containing %q", err, c.errSubstr)
+				}
+			} else if err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestRegistryRegisterPanicsOnHostPath(t *testing.T) {
 	// Verify the registry guard fires when path points to real ~/.gc.
 	home, err := os.UserHomeDir()
