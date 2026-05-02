@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/99designs/keyring"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -30,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/supervisor/secrets"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
@@ -381,6 +383,10 @@ var (
 	supervisorReloadQueueTimeout = 5 * time.Second
 	supervisorReloadWaitTimeout  = 5 * time.Minute
 )
+
+// secretsLoader is package-level so the SIGHUP handler (Task 8) can
+// access it to call Reload. Initialized in runSupervisor.
+var secretsLoader *secrets.Loader
 
 // shutdownState tracks the supervisor's shutdown progress so socket
 // handlers can report the final result to --wait clients. done is closed
@@ -984,6 +990,31 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
 		return 1
+	}
+
+	// Validate secrets config; fatal if invalid (catches bad prefixes before
+	// any keyring access). Wiring is AFTER config-load, BEFORE API bind.
+	if err := supCfg.Secrets.Validate(isReservedSupervisorEnvKey); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: supervisor.toml: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	secretsLoader = secrets.NewLoader(keyring.TerminalPrompt)
+	secResult, secErr := secretsLoader.LoadAll(ctx, supCfg.Secrets)
+	if secErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: secrets load failed: %v (continuing without loaded secrets)\n", secErr) //nolint:errcheck
+	} else {
+		if len(secResult.Set) > 0 {
+			fmt.Fprintf(stderr, "gc supervisor: loaded %d secrets: %s\n", len(secResult.Set), strings.Join(secResult.Set, ", ")) //nolint:errcheck
+		}
+		for _, p := range secResult.Missing {
+			fmt.Fprintf(stderr, "gc supervisor: WARN: secrets prefix %q matched zero items in keyring\n", p) //nolint:errcheck
+		}
+		for _, k := range secResult.Skipped {
+			fmt.Fprintf(stderr, "gc supervisor: WARN: secret %q has empty value in keyring; skipped\n", k) //nolint:errcheck
+		}
+		for _, e := range secResult.Errors {
+			fmt.Fprintf(stderr, "gc supervisor: WARN: secrets load error: %v\n", e) //nolint:errcheck
+		}
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
