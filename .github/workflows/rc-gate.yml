@@ -365,7 +365,7 @@ jobs:
             --rm \
             -v "$PWD:/go/src/github.com/gastownhall/gascity" \
             -w /go/src/github.com/gastownhall/gascity \
-            ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3-v2.15.4 \
+            ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3-v2.15.4@sha256:bd51e63c1432305eb0309cdf3bff11e5ae6419cefb10839fea3e705f3e5d57da \
             release --snapshot --clean
       - name: Upload GoReleaser dist
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

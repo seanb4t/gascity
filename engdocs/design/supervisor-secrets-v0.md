@@ -46,6 +46,10 @@ The change is one-time infrastructure work — see Pre-Task in `plans/supervisor
 
 **Trade-off accepted:** release artifact size grows modestly (~10-20%) due to libsystem linkage; release pipeline run time increases from ~3 min to ~10 min due to docker image pull and cross-compile overhead. Both costs are acceptable to keep the in-process-keyring design instead of pivoting to subprocess shelling.
 
+**Go version:** the goreleaser-cross image embeds the Go toolchain version that prefixes its tag (currently Go 1.26.2 in `v1.26.2-3-v2.15.4`). This is intentionally newer than the floor in `go.mod` (currently 1.25.9) — release builds use the most recent stable Go to pick up security patches and compiler improvements, while the module's `go` directive states the minimum source-compatibility floor.
+
+**Bumping goreleaser-cross:** find the latest tag at `https://github.com/goreleaser/goreleaser-cross/pkgs/container/goreleaser-cross`, update the image reference in both `.github/workflows/release.yml` and `.github/workflows/rc-gate.yml`, re-resolve the SHA256 digest (`docker inspect --format='{{index .RepoDigests 0}}' <new-tag>`), update the digest pins, and run `make rc-gate-snapshot` (or push to a branch and let CI exercise the snapshot path) to verify before merging.
+
 ## Design decisions (settled)
 
 | # | Decision | Rationale |
