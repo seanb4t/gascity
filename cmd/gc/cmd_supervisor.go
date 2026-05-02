@@ -714,6 +714,45 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		}
 	}
 
+	// SIGHUP triggers config + secrets reload. Children spawned before
+	// the HUP retain their env (Unix process env is immutable post-spawn);
+	// future spawns inherit the new values.
+	configPath := supervisor.ConfigPath()
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	go func() {
+		for range hupCh {
+			fmt.Fprintf(stderr, "supervisor: SIGHUP received; reloading config and secrets\n") //nolint:errcheck
+			// Re-read config from the same path runSupervisor used.
+			newCfg, err := supervisor.LoadConfig(configPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "supervisor: SIGHUP: config reload failed: %v (keeping previous config)\n", err) //nolint:errcheck
+				continue
+			}
+			if err := newCfg.Secrets.Validate(isReservedSupervisorEnvKey); err != nil {
+				fmt.Fprintf(stderr, "supervisor: SIGHUP: secrets validation failed: %v (keeping previous secrets)\n", err) //nolint:errcheck
+				continue
+			}
+			// Backend swap requires restart; warn and keep going with the
+			// existing backend by ignoring backend changes.
+			if newCfg.Secrets.Backend != supCfg.Secrets.Backend {
+				fmt.Fprintf(stderr, "supervisor: SIGHUP: WARN: backend change %q -> %q ignored; restart to apply\n",
+					supCfg.Secrets.Backend, newCfg.Secrets.Backend) //nolint:errcheck
+				newCfg.Secrets.Backend = supCfg.Secrets.Backend
+			}
+			rr, err := secretsLoader.Reload(context.Background(), newCfg.Secrets)
+			if err != nil {
+				fmt.Fprintf(stderr, "supervisor: SIGHUP: secrets reload failed: %v\n", err) //nolint:errcheck
+				continue
+			}
+			fmt.Fprintf(stderr, "supervisor: SIGHUP: reloaded — added=%v updated=%v removed=%v\n",
+				rr.Added, rr.Updated, rr.Removed) //nolint:errcheck
+			// Replace cfg in scope so subsequent reloads diff against the
+			// most recent values.
+			supCfg = newCfg
+		}
+	}()
+
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 
 	// Track managed cities via atomic-snapshot registry. API reads are
