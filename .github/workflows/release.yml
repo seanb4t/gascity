@@ -43,12 +43,16 @@ jobs:
         run: make check-version-tag
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
-        with:
-          version: "~> v2"
-          args: >
-            release --clean
-            ${{ github.repository != 'gastownhall/gascity' && '--skip=publish --skip=announce' || '' }}
+        run: |
+          docker run \
+            --rm \
+            -e GITHUB_TOKEN \
+            -e GORELEASER_CURRENT_TAG \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/go/src/github.com/gastownhall/gascity" \
+            -w /go/src/github.com/gastownhall/gascity \
+            ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3-v2.15.4 \
+            release --clean ${{ github.repository != 'gastownhall/gascity' && '--skip=publish --skip=announce' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

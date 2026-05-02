@@ -374,10 +374,13 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run GoReleaser snapshot
-        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
-        with:
-          version: "~> v2"
-          args: release --snapshot --clean
+        run: |
+          docker run \
+            --rm \
+            -v "$PWD:/go/src/github.com/gastownhall/gascity" \
+            -w /go/src/github.com/gastownhall/gascity \
+            ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3-v2.15.4 \
+            release --snapshot --clean
       - name: Upload GoReleaser dist
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
