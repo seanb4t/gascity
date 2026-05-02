@@ -32,6 +32,20 @@ Add config-driven, in-process secret loading to `gc supervisor run` that:
 - Auto-discovery of unconfigured Keychain items — the supervisor never loads anything not declared in `prefixes`. `gc supervisor secret list` surfaces orphans as a hint only.
 - Deprecation of `GC_SUPERVISOR_ENV` — coexists in v1; future call.
 
+## Distribution constraints
+
+This feature requires CGo on every supported platform:
+
+- **macOS**: `99designs/keyring` Keychain backend links against Apple's Security framework.
+- **Linux**: Secret Service backend links against libdbus.
+- **Windows**: WinCred backend uses `syscall` only and does not strictly require CGo, but the build is consistent across platforms.
+
+Pre-feature, gc shipped as a pure-Go (`CGO_ENABLED=0`) binary via goreleaser. This feature requires switching the release pipeline to CGo cross-compilation using `ghcr.io/goreleaser/goreleaser-cross`, which bundles `osxcross` and Linux cross-gcc toolchains.
+
+The change is one-time infrastructure work — see Pre-Task in `plans/supervisor-secrets-keychain.md`. After this switch, every gc release is CGo-enabled across all platforms.
+
+**Trade-off accepted:** release artifact size grows modestly (~10-20%) due to libsystem linkage; release pipeline run time increases from ~3 min to ~10 min due to docker image pull and cross-compile overhead. Both costs are acceptable to keep the in-process-keyring design instead of pivoting to subprocess shelling.
+
 ## Design decisions (settled)
 
 | # | Decision | Rationale |
