@@ -2811,25 +2811,26 @@ func TestStopSupervisorWithWaitTimesOutWhenSocketKeepsAnswering(t *testing.T) {
 	}
 }
 
-func TestIsReservedSupervisorEnvKey(t *testing.T) {
+func Test_isReservedSupervisorEnvKey(t *testing.T) {
 	cases := []struct {
 		key  string
 		want bool
 	}{
-		{"GC_HOME", true},           // fixed
-		{"PATH", true},              // fixed
-		{"XDG_RUNTIME_DIR", true},   // fixed
-		{"HOME", true},              // auto-persist whitelist
-		{"USER", true},              // auto-persist whitelist
-		{"SHELL", true},             // auto-persist whitelist
-		{"LANG", true},              // auto-persist whitelist
-		{"EXA_API_KEY", false},      // user-defined
+		{"GC_HOME", true},            // fixed
+		{"PATH", true},               // fixed
+		{"XDG_RUNTIME_DIR", true},    // fixed
+		{"HOME", true},               // auto-persist whitelist
+		{"USER", true},               // auto-persist whitelist
+		{"SHELL", true},              // auto-persist whitelist
+		{"LANG", true},               // auto-persist whitelist
+		{"EXA_API_KEY", false},       // user-defined
 		{"ANTHROPIC_API_KEY", false}, // provider prefix, not reserved per se
 		{"", false},
+		{"home", false}, // case-sensitive: lowercase variants are not reserved (Unix env vars are case-sensitive by spec)
 	}
 	for _, c := range cases {
-		if got := IsReservedSupervisorEnvKey(c.key); got != c.want {
-			t.Errorf("IsReservedSupervisorEnvKey(%q) = %v, want %v", c.key, got, c.want)
+		if got := isReservedSupervisorEnvKey(c.key); got != c.want {
+			t.Errorf("isReservedSupervisorEnvKey(%q) = %v, want %v", c.key, got, c.want)
 		}
 	}
 }

@@ -31,7 +31,7 @@
 - `go.mod`, `go.sum` — add `github.com/99designs/keyring` dep
 - `internal/supervisor/config.go` — add `SecretsConfig`, `KeychainBackendConfig`, `FileBackendConfig`, `Validate`
 - `internal/supervisor/config_test.go` — validation tests
-- `cmd/gc/cmd_supervisor_lifecycle.go` — promote `IsReservedSupervisorEnvKey`; wire `secrets.LoadAll`; install SIGHUP handler; help text update
+- `cmd/gc/cmd_supervisor_lifecycle.go` — promote `isReservedSupervisorEnvKey`; wire `secrets.LoadAll`; install SIGHUP handler; help text update
 - `cmd/gc/cmd_supervisor.go` — register new `secret` subcommand under `supervisor`
 - `engdocs/design/machine-wide-supervisor-v0.md` — short "External secrets" cross-reference section
 - `AGENTS.md` — one-line note under "Code conventions"
@@ -234,7 +234,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 2: Extract `IsReservedSupervisorEnvKey` helper
+## Task 2: Extract `isReservedSupervisorEnvKey` helper
 
 **Files:**
 - Modify: `cmd/gc/cmd_supervisor_lifecycle.go:381-414`
@@ -247,7 +247,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 Add to `cmd/gc/cmd_supervisor_test.go`:
 
 ```go
-func TestIsReservedSupervisorEnvKey(t *testing.T) {
+func TestisReservedSupervisorEnvKey(t *testing.T) {
     cases := []struct {
         key  string
         want bool
@@ -264,8 +264,8 @@ func TestIsReservedSupervisorEnvKey(t *testing.T) {
         {"", false},
     }
     for _, c := range cases {
-        if got := IsReservedSupervisorEnvKey(c.key); got != c.want {
-            t.Errorf("IsReservedSupervisorEnvKey(%q) = %v, want %v", c.key, got, c.want)
+        if got := isReservedSupervisorEnvKey(c.key); got != c.want {
+            t.Errorf("isReservedSupervisorEnvKey(%q) = %v, want %v", c.key, got, c.want)
         }
     }
 }
@@ -273,20 +273,20 @@ func TestIsReservedSupervisorEnvKey(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `go test ./cmd/gc/ -run TestIsReservedSupervisorEnvKey -v`
-Expected: FAIL with "undefined: IsReservedSupervisorEnvKey"
+Run: `go test ./cmd/gc/ -run TestisReservedSupervisorEnvKey -v`
+Expected: FAIL with "undefined: isReservedSupervisorEnvKey"
 
 - [ ] **Step 3: Add the helper to `cmd/gc/cmd_supervisor_lifecycle.go`**
 
 After line 414 (after the existing maps), add:
 
 ```go
-// IsReservedSupervisorEnvKey reports whether name is an env var the
+// isReservedSupervisorEnvKey reports whether name is an env var the
 // supervisor itself controls (fixed keys like GC_HOME) or auto-persists
 // from the install-time shell (HOME, USER, SHELL, etc). Such keys MUST
 // NOT be redefined by user-supplied mechanisms (GC_SUPERVISOR_ENV opt-in
 // list, [secrets.keychain] prefixes, etc).
-func IsReservedSupervisorEnvKey(name string) bool {
+func isReservedSupervisorEnvKey(name string) bool {
     if supervisorServiceFixedEnvKeys[name] {
         return true
     }
@@ -312,7 +312,7 @@ func shouldPersistSupervisorEnv(key string) bool {
 
 This stays as-is — the existing logic uses `supervisorServiceFixedEnvKeys` to *exclude* and `supervisorServiceEnvKeys` to *include*. Different semantic from the new "reserved" check. Don't touch this function.
 
-In `cmd/gc/cmd_supervisor_lifecycle.go:462-476` (`supervisorServiceExplicitEnvKeys`), replace the inline `supervisorServiceFixedEnvKeys[key]` check on line 468 with `IsReservedSupervisorEnvKey(key)`:
+In `cmd/gc/cmd_supervisor_lifecycle.go:462-476` (`supervisorServiceExplicitEnvKeys`), replace the inline `supervisorServiceFixedEnvKeys[key]` check on line 468 with `isReservedSupervisorEnvKey(key)`:
 
 ```go
 func supervisorServiceExplicitEnvKeys(raw string) []string {
@@ -321,7 +321,7 @@ func supervisorServiceExplicitEnvKeys(raw string) []string {
     seen := make(map[string]bool, len(fields))
     for _, field := range fields {
         key := strings.TrimSpace(field)
-        if key == "" || seen[key] || !supervisorServiceEnvNameRE.MatchString(key) || IsReservedSupervisorEnvKey(key) {
+        if key == "" || seen[key] || !supervisorServiceEnvNameRE.MatchString(key) || isReservedSupervisorEnvKey(key) {
             continue
         }
         seen[key] = true
@@ -337,7 +337,7 @@ This is a behavior change for `GC_SUPERVISOR_ENV`: previously, listing `HOME` in
 - [ ] **Step 5: Run all supervisor tests**
 
 Run: `go test ./cmd/gc/ -run 'Supervisor|IsReserved' -v`
-Expected: PASS — including the new `TestIsReservedSupervisorEnvKey` and any existing tests that exercise `supervisorServiceExplicitEnvKeys`.
+Expected: PASS — including the new `TestisReservedSupervisorEnvKey` and any existing tests that exercise `supervisorServiceExplicitEnvKeys`.
 
 If an existing test breaks because it exercises the "list HOME in GC_SUPERVISOR_ENV → still works" pattern, fix the test to assert the new "rejected as reserved" behavior. Document this in the commit body.
 
@@ -345,7 +345,7 @@ If an existing test breaks because it exercises the "list HOME in GC_SUPERVISOR_
 
 ```
 git add cmd/gc/cmd_supervisor_lifecycle.go cmd/gc/cmd_supervisor_test.go
-git commit -m "refactor(supervisor): extract IsReservedSupervisorEnvKey helper
+git commit -m "refactor(supervisor): extract isReservedSupervisorEnvKey helper
 
 Promotes the union of supervisorServiceFixedEnvKeys and
 supervisorServiceEnvKeys into a single reusable predicate. The new
@@ -524,7 +524,7 @@ var envVarNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 // Validate checks the configuration for shape errors. The
 // reservedKey predicate is injected by the caller (cmd/gc passes
-// IsReservedSupervisorEnvKey); when nil, a minimal default that
+// isReservedSupervisorEnvKey); when nil, a minimal default that
 // recognizes only PATH and GC_HOME is used.
 func (c SecretsConfig) Validate(reservedKey func(string) bool) error {
     if !validSecretBackends[c.Backend] {
@@ -591,7 +591,7 @@ git commit -m "feat(supervisor): add SecretsConfig schema and validation
 Adds SecretsConfig, KeychainBackendConfig, FileBackendConfig types
 and a Validate(reservedKey func(string) bool) method. The reservedKey
 injection avoids an import cycle while letting the cmd/gc layer
-share its IsReservedSupervisorEnvKey predicate.
+share its isReservedSupervisorEnvKey predicate.
 
 Per spec engdocs/design/supervisor-secrets-v0.md.
 
@@ -1436,7 +1436,7 @@ In the `runSupervisor` function (whichever file it lives in), after the config-l
 var secretsLoader *secrets.Loader
 
 // In runSupervisor, after loading cfg from supervisor.toml:
-if err := cfg.Secrets.Validate(IsReservedSupervisorEnvKey); err != nil {
+if err := cfg.Secrets.Validate(isReservedSupervisorEnvKey); err != nil {
     return fmt.Errorf("supervisor.toml: %w", err)
 }
 secretsLoader = secrets.NewLoader(keyring.TerminalPrompt)
@@ -1578,7 +1578,7 @@ go func() {
             log.Printf("supervisor: SIGHUP: config reload failed: %v (keeping previous config)", err)
             continue
         }
-        if err := newCfg.Secrets.Validate(IsReservedSupervisorEnvKey); err != nil {
+        if err := newCfg.Secrets.Validate(isReservedSupervisorEnvKey); err != nil {
             log.Printf("supervisor: SIGHUP: secrets validation failed: %v (keeping previous secrets)", err)
             continue
         }
@@ -1865,7 +1865,7 @@ func loadSupervisorConfigForSecrets() (supervisor.Config, error) {
     if err != nil {
         return cfg, fmt.Errorf("loading supervisor config: %w", err)
     }
-    if err := cfg.Secrets.Validate(IsReservedSupervisorEnvKey); err != nil {
+    if err := cfg.Secrets.Validate(isReservedSupervisorEnvKey); err != nil {
         return cfg, fmt.Errorf("supervisor.toml secrets section: %w", err)
     }
     return cfg, nil
@@ -2962,7 +2962,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 - `Loader.LoadAll` signature: `(ctx, cfg) (Result, error)` — used identically in Tasks 5, 7, 13 (via `Names()`).
 - `Loader.Reload` signature: `(ctx, cfg) (ReloadResult, error)` — Tasks 6, 8.
 - `OpenKeyring`: exported in Task 9, used in Tasks 9-14.
-- `IsReservedSupervisorEnvKey`: defined Task 2, used Tasks 3 (via injection), 7, 9.
+- `isReservedSupervisorEnvKey`: defined Task 2, used Tasks 3 (via injection), 7, 9.
 - `SecretsConfig.Validate(reservedKey func(string) bool)`: signature consistent across Tasks 3, 7, 9.
 - `SecretStatus`/`SupervisorSecretsStatusOutput`: defined Task 13, parsed by Task 14 client.
 

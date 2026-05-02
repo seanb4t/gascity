@@ -413,12 +413,12 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 	"XDG_RUNTIME_DIR": true,
 }
 
-// IsReservedSupervisorEnvKey reports whether name is an env var the
+// isReservedSupervisorEnvKey reports whether name is an env var the
 // supervisor itself controls (fixed keys like GC_HOME) or auto-persists
 // from the install-time shell (HOME, USER, SHELL, etc). Such keys MUST
 // NOT be redefined by user-supplied mechanisms (GC_SUPERVISOR_ENV opt-in
 // list, [secrets.keychain] prefixes, etc).
-func IsReservedSupervisorEnvKey(name string) bool {
+func isReservedSupervisorEnvKey(name string) bool {
 	if supervisorServiceFixedEnvKeys[name] {
 		return true
 	}
@@ -452,6 +452,13 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	return out
 }
 
+// shouldPersistSupervisorEnv decides whether to capture a key from
+// the install-time shell into the platform-service env block. Unlike
+// isReservedSupervisorEnvKey, this predicate uses the two maps with
+// OPPOSITE polarity: supervisorServiceFixedEnvKeys excludes (the
+// supervisor sets these itself), supervisorServiceEnvKeys includes
+// (auto-persist whitelist). Do not collapse this into the unified
+// reserved check — the asymmetry is intentional.
 func shouldPersistSupervisorEnv(key string) bool {
 	if !supervisorServiceEnvNameRE.MatchString(key) || supervisorServiceFixedEnvKeys[key] {
 		return false
@@ -477,7 +484,7 @@ func supervisorServiceExplicitEnvKeys(raw string) []string {
 	seen := make(map[string]bool, len(fields))
 	for _, field := range fields {
 		key := strings.TrimSpace(field)
-		if key == "" || seen[key] || !supervisorServiceEnvNameRE.MatchString(key) || IsReservedSupervisorEnvKey(key) {
+		if key == "" || seen[key] || !supervisorServiceEnvNameRE.MatchString(key) || isReservedSupervisorEnvKey(key) {
 			continue
 		}
 		seen[key] = true
