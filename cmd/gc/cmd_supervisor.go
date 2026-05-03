@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/99designs/keyring"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -385,7 +384,7 @@ var (
 	supervisorReloadWaitTimeout  = 5 * time.Minute
 )
 
-// secretsLoader is package-level so the SIGHUP handler (Task 8) can
+// secretsLoader is package-level so the SIGHUP handler (installed in runSupervisor) can
 // access it to call Reload. Initialized in runSupervisor.
 var secretsLoader *secrets.Loader
 
@@ -999,7 +998,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor.toml: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	secretsLoader = secrets.NewLoader(secretsFilePromptFunc())
+	secretsLoader = secrets.NewLoader(secrets.EnvPasswordPromptFunc())
 	secResult, secErr := secretsLoader.LoadAll(ctx, supCfg.Secrets)
 	if secErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: secrets load failed: %v (continuing without loaded secrets)\n", secErr) //nolint:errcheck
@@ -2303,20 +2302,4 @@ type cityInitProgress struct {
 // Compile-time check that *cityRegistry satisfies api.CityResolver.
 var _ api.CityResolver = (*cityRegistry)(nil)
 
-// secretsFileEnvPasswordVar is the environment variable consulted by
-// secretsFilePromptFunc. When set, its value is used as the file-backend
-// encryption password without prompting the terminal. This is intended for
-// headless deployments and integration tests; it MUST NOT be used in
-// interactive sessions where better security is available.
-const secretsFileEnvPasswordVar = "GC_SECRETS_FILE_PASSWORD"
 
-// secretsFilePromptFunc returns a keyring.PromptFunc for the file backend.
-// If GC_SECRETS_FILE_PASSWORD is set in the environment, that value is
-// returned directly (no terminal interaction). Otherwise, keyring.TerminalPrompt
-// is used, which reads from the controlling TTY.
-func secretsFilePromptFunc() func(string) (string, error) {
-	if pw := os.Getenv(secretsFileEnvPasswordVar); pw != "" {
-		return func(_ string) (string, error) { return pw, nil }
-	}
-	return keyring.TerminalPrompt
-}

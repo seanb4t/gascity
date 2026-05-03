@@ -12,7 +12,7 @@ import (
 
 // TestRunSupervisor_LoadsSecretsBeforeAPIBind exercises the loader
 // in isolation to catch wiring errors. The full integration is
-// covered by Task 15's integration tests.
+// covered by the integration test in test/integration/secrets_integration_test.go.
 func TestRunSupervisor_LoadsSecretsBeforeAPIBind(t *testing.T) {
 	if v, ok := os.LookupEnv("EXA_API_KEY"); ok {
 		t.Cleanup(func() { os.Setenv("EXA_API_KEY", v) })    //nolint:errcheck,tenv

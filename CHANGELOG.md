@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[secrets]` section in `~/.gc/supervisor.toml` for config-driven secret loading.
 - `GET /v1/supervisor/secrets/status` HTTP API endpoint returning loaded secret names and SHA-256 hashes (never values) for drift detection.
 - `gc supervisor secret list` drift detection (OK / MISSING / STALE / MISMATCH / ORPHAN status).
+- `GC_SECRETS_FILE_PASSWORD` env var for headless deployments using the file secrets backend.
 
 ### Fixed
 
@@ -153,6 +154,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `lane_id`, `provider`, and `model` fields, and the finalizer rejects blank
   lane IDs without merging contract-invalid lane findings, evidence, or usage
   into the synthesized summary.
+- `agent_defaults.allow_env_override` now actually bridges process env into MCP template context. Previously parsed but ignored at runtime per its own doc comment; now keys listed there are pulled from `os.Environ()` into the template data when not already provided via per-agent env. Combined with the new supervisor-secrets feature, this lets users reference keychain-stored secrets in MCP templates (e.g., `{{.EXA_API_KEY}}`).
+- `gc supervisor secret list` and `gc mcp list --agent <name>` both load supervisor secrets before running so inspection commands see the same env as the running supervisor would.
 - Release pipeline switched from `goreleaser-action` (CGO_ENABLED=0) to `goreleaser-cross` Docker image (CGo cross-compile) to support the new keyring backends. This affects release-build infrastructure only; `make test` and local development are unchanged.
 - `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
   override (`rig` unset) still matches **only** city-level orders; if the

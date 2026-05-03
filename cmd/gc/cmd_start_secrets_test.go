@@ -26,8 +26,8 @@ func setupStartSecretsTest(t *testing.T, keyName, keyVal string) supervisor.Secr
 	}
 	os.Unsetenv(keyName) //nolint:tenv
 
-	// Use the fixed password via the env var that secretsFilePromptFunc reads.
-	t.Setenv(secretsFileEnvPasswordVar, startTestSecretsPassword)
+	// Use the fixed password via the env var that EnvPasswordPromptFunc reads.
+	t.Setenv(supsecrets.EnvPasswordVar, startTestSecretsPassword)
 
 	fileDir := t.TempDir()
 	tomlBody := "[secrets]\nbackend = \"file\"\n\n[secrets.file]\ndir = \"" + fileDir + "\"\nprefixes = [\"" + keyName + "\"]\n"
@@ -68,7 +68,7 @@ func TestGCStart_LoadsSecretsBeforeMCPExpansion(t *testing.T) {
 
 	cfg := setupStartSecretsTest(t, testKey, testVal)
 
-	loader := supsecrets.NewLoader(secretsFilePromptFunc())
+	loader := supsecrets.NewLoader(supsecrets.EnvPasswordPromptFunc())
 	res, err := loader.LoadAll(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
