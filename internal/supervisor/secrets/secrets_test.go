@@ -238,3 +238,52 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestReload_RemovedKeyDoesNotAlsoAppearAsMissing(t *testing.T) {
+	// Regression: a key that was loaded last time but is now absent
+	// should appear in Removed, NOT in both Missing and Removed.
+	scrubEnv(t, "GONE_KEY")
+	cfg := seedAgeStore(t, []string{"GONE_KEY"}, map[string]string{"GONE_KEY": "v"})
+	loader := NewLoader()
+	if _, err := loader.LoadAll(context.Background(), cfg); err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	// Delete the key from the store.
+	store, err := Open(cfg.Age)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.Remove("GONE_KEY"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	rr, err := loader.Reload(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if len(rr.Missing) != 0 {
+		t.Errorf("removed key must NOT appear in Missing; got Missing=%v", rr.Missing)
+	}
+	wantRemoved := []string{"GONE_KEY"}
+	if !equalStringSlices(rr.Removed, wantRemoved) {
+		t.Errorf("Removed: want %v, got %v", wantRemoved, rr.Removed)
+	}
+}
+
+func TestReload_NewlyMissingKeyAppearsAsMissing(t *testing.T) {
+	// A key that was NEVER loaded (genuinely new + not in store)
+	// should still appear in rr.Missing.
+	scrubEnv(t, "NEW_KEY")
+	cfg := seedAgeStore(t, []string{"NEW_KEY"}, map[string]string{}) // no items
+	loader := NewLoader()
+	rr, err := loader.Reload(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if len(rr.Removed) != 0 {
+		t.Errorf("never-loaded key must not appear in Removed; got %v", rr.Removed)
+	}
+	wantMissing := []string{"NEW_KEY"}
+	if !equalStringSlices(rr.Missing, wantMissing) {
+		t.Errorf("Missing: want %v, got %v", wantMissing, rr.Missing)
+	}
+}

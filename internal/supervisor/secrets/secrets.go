@@ -105,7 +105,14 @@ func (l *Loader) Reload(ctx context.Context, cfg supervisor.SecretsConfig) (Relo
 		data, err := store.Get(key)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
-				rr.Missing = append(rr.Missing, key)
+				if _, wasSet := l.lastSet[key]; !wasSet {
+					// Newly missing — was never loaded.
+					rr.Missing = append(rr.Missing, key)
+				}
+				// Else: was loaded last time; the trailing lastSet
+				// diff loop will report it as Removed. Avoid the
+				// double-classification (Missing + Removed) for the
+				// same key.
 				continue
 			}
 			rr.Errors = append(rr.Errors, fmt.Errorf("get %s: %w", key, err))

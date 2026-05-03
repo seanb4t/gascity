@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -231,12 +232,28 @@ suggested [secrets.age] keys = [...] block to add to ~/.gc/supervisor.toml.`,
 				imported = append(imported, k)
 			}
 			sort.Strings(imported)
-			fmt.Fprintf(stdout, "Imported %d secrets to the age store.\n\n", len(imported))
+			resolvedDir := resolvedAgeDir(cfg.Secrets.Age)
+			fmt.Fprintf(stdout, "Imported %d secrets to age store at %s.\n\n", len(imported), resolvedDir)
 			fmt.Fprintln(stdout, "Add the following to ~/.gc/supervisor.toml:")
-			fmt.Fprintf(stdout, "\n[secrets.age]\nkeys = [%s]\n", quotedList(imported))
+			if cfg.Secrets.Age.Dir != "" {
+				fmt.Fprintf(stdout, "\n[secrets.age]\ndir = %q\nkeys = [%s]\n", cfg.Secrets.Age.Dir, quotedList(imported))
+			} else {
+				fmt.Fprintf(stdout, "\n[secrets.age]\nkeys = [%s]\n", quotedList(imported))
+			}
 			return nil
 		},
 	}
+}
+
+// resolvedAgeDir returns the directory that secrets.Open would use for
+// cfg.Age — the explicit Dir if set, otherwise the default
+// ($GC_HOME/secrets). Used by import-env to print the user-visible
+// path even when the user hasn't configured a custom dir.
+func resolvedAgeDir(cfg supervisor.AgeBackendConfig) string {
+	if cfg.Dir != "" {
+		return cfg.Dir
+	}
+	return filepath.Join(supervisor.DefaultHome(), "secrets")
 }
 
 // quotedList formats items as a comma-separated list of Go-quoted strings
@@ -310,7 +327,7 @@ func isNotFoundErr(err error) bool {
 type secretRow struct {
 	Name       string `json:"name"`
 	Configured bool   `json:"configured"`
-	InKeyring  bool   `json:"in_keyring"`
+	InStore    bool   `json:"in_store"`
 	LiveStatus string `json:"live_status"`
 	Status     string `json:"status"`
 }
@@ -377,7 +394,7 @@ func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
 			rows = append(rows, secretRow{
 				Name:       key,
 				Configured: true,
-				InKeyring:  false,
+				InStore:  false,
 				LiveStatus: "no",
 				Status:     "MISSING",
 			})
@@ -402,7 +419,7 @@ func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
 		rows = append(rows, secretRow{
 			Name:       key,
 			Configured: true,
-			InKeyring:  true,
+			InStore:  true,
 			LiveStatus: liveStatus,
 			Status:     status,
 		})
@@ -415,7 +432,7 @@ func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
 		rows = append(rows, secretRow{
 			Name:       k,
 			Configured: false,
-			InKeyring:  true,
+			InStore:  true,
 			LiveStatus: "no",
 			Status:     "ORPHAN",
 		})
@@ -467,7 +484,7 @@ func printSecretRowsTable(out io.Writer, rows []secretRow) error {
 	fmt.Fprintf(out, "%-24s %-11s %-12s %-22s %s\n", "NAME", "CONFIGURED", "IN-STORE", "LIVE-IN-SUPERVISOR", "STATUS")
 	for _, r := range rows {
 		fmt.Fprintf(out, "%-24s %-11s %-12s %-22s %s\n",
-			r.Name, yesno(r.Configured), yesno(r.InKeyring), r.LiveStatus, r.Status)
+			r.Name, yesno(r.Configured), yesno(r.InStore), r.LiveStatus, r.Status)
 	}
 	return nil
 }
