@@ -18,23 +18,53 @@ import (
 	"testing"
 	"time"
 
-	"github.com/99designs/keyring"
+	supervisor "github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/supervisor/secrets"
 )
 
-// TestSupervisor_LoadsSecretsAtStartup builds the real gc binary, starts a
-// supervisor with a file-backend keyring containing EXA_API_KEY, waits for it
+// seedAgeStoreForIntegration creates a secrets.Store rooted at
+// filepath.Join(gcHome, "secrets") and writes each key→value pair into it.
+// GC_SECRETS_PASSPHRASE is set to "test-pass" for the duration of the test.
+func seedAgeStoreForIntegration(t *testing.T, gcHome string, items map[string]string) {
+	t.Helper()
+	// GC_HOME must be set so secrets.Open can resolve the default passphrase
+	// keyfile path (supervisor.DefaultHome panics in test binaries without it).
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(secrets.EnvPassphraseVar, "test-pass")
+	secretsDir := filepath.Join(gcHome, "secrets")
+	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
+		t.Fatalf("mkdir secrets dir: %v", err)
+	}
+	keys := make([]string, 0, len(items))
+	for k := range items {
+		keys = append(keys, k)
+	}
+	cfg := supervisor.AgeBackendConfig{Dir: secretsDir, Keys: keys}
+	store, err := secrets.Open(cfg)
+	if err != nil {
+		t.Fatalf("secrets.Open: %v", err)
+	}
+	for k, v := range items {
+		if err := store.Set(k, []byte(v)); err != nil {
+			t.Fatalf("Set %s: %v", k, err)
+		}
+	}
+}
+
+// TestSupervisor_LoadsAgeSecretsAtStartup builds the real gc binary, starts a
+// supervisor with an age-encrypted store containing EXA_API_KEY, waits for it
 // to be healthy, then queries GET /v1/supervisor/secrets/status to confirm the
 // secret was loaded. This exercises the full path:
-// SecretsConfig → keyring.Open → Loader.LoadAll → os.Setenv → API endpoint.
-func TestSupervisor_LoadsSecretsAtStartup(t *testing.T) {
+// SecretsConfig → secrets.Open → Loader.LoadAll → os.Setenv → API endpoint.
+func TestSupervisor_LoadsAgeSecretsAtStartup(t *testing.T) {
 	bin := buildGCBinary(t)
 
 	// Use a short-path root (macOS AF_UNIX path limit ~104 chars).
 	root := shortTempDir(t)
 	gcHome := filepath.Join(root, "home")
-	keyringDir := filepath.Join(gcHome, "secrets")
+	secretsDir := filepath.Join(gcHome, "secrets")
 	runtimeDir := filepath.Join(root, "run")
-	for _, dir := range []string{gcHome, keyringDir, runtimeDir} {
+	for _, dir := range []string{gcHome, secretsDir, runtimeDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
@@ -45,42 +75,28 @@ func TestSupervisor_LoadsSecretsAtStartup(t *testing.T) {
 		t.Fatalf("seed dolt identity: %v", err)
 	}
 
-	// Write the secret into the file-backend keyring. We use the same
-	// fixed password that the supervisor config will pass at load time.
+	// Write the secret into the age store.
 	const secretValue = "integration-value"
-	ring, err := keyring.Open(keyring.Config{
-		ServiceName:      "gc-supervisor",
-		AllowedBackends:  []keyring.BackendType{keyring.FileBackend},
-		FileDir:          keyringDir,
-		FilePasswordFunc: func(_ string) (string, error) { return "test-password", nil },
+	seedAgeStoreForIntegration(t, gcHome, map[string]string{
+		"EXA_API_KEY": secretValue,
 	})
-	if err != nil {
-		t.Fatalf("open keyring: %v", err)
-	}
-	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte(secretValue)}); err != nil {
-		t.Fatalf("keyring.Set EXA_API_KEY: %v", err)
-	}
 
 	port := reserveFreePort(t)
 	cfg := fmt.Sprintf(`[supervisor]
 port = %d
 
-[secrets]
-backend = "file"
-
-[secrets.file]
+[secrets.age]
 dir = %q
-prefixes = ["EXA_API_KEY"]
-`, port, keyringDir)
+keys = ["EXA_API_KEY"]
+`, port, secretsDir)
 	if err := os.WriteFile(filepath.Join(gcHome, "supervisor.toml"), []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write supervisor.toml: %v", err)
 	}
 
 	baseURL := "http://127.0.0.1:" + fmt.Sprint(port)
 	env := integrationEnvFor(gcHome, runtimeDir, true)
-	// Supply the file-backend password via env so the supervisor doesn't
-	// try to open an interactive terminal prompt.
-	env = append(env, "GC_SECRETS_FILE_PASSWORD=test-password")
+	// Supply the age passphrase via env so the supervisor doesn't prompt.
+	env = append(env, secrets.EnvPassphraseVar+"=test-pass")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -149,9 +165,9 @@ prefixes = ["EXA_API_KEY"]
 	}
 }
 
-// TestSupervisor_SIGHUPReload verifies cross-process SIGHUP secret reload.
+// TestSupervisor_AgeSIGHUPReload verifies cross-process SIGHUP secret reload.
 // Reload logic is covered by unit tests (TestSecretsReload_RoundTrip, TestReload_*);
 // this test adds signal-delivery coverage once a shared HTTP test client exists.
-func TestSupervisor_SIGHUPReload(t *testing.T) {
+func TestSupervisor_AgeSIGHUPReload(t *testing.T) {
 	t.Skip("TODO: requires a gc API test client helper to assert SHA-256 change after SIGHUP")
 }
