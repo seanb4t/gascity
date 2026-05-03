@@ -160,5 +160,5 @@ prefixes = ["EXA_API_KEY"]
 // doesn't exist yet in the test suite. Scaffold is here; flesh out once the
 // helper lands.
 func TestSupervisor_SIGHUPReload(t *testing.T) {
-	t.Skip("pending API client helper for tests — scaffold present, assertions need query-after-SIGHUP support")
+	t.Skip("TODO: flesh out SIGHUP reload assertions. Requires either (a) a generic gc API test client helper to fetch /v1/supervisor/secrets/status after SIGHUP and assert the SHA-256 changed, or (b) inlining a small HTTP client here. The Loader.Reload code path is fully covered by unit tests in cmd/gc/cmd_supervisor_lifecycle_secrets_test.go (TestSecretsReload_RoundTrip) and internal/supervisor/secrets/secrets_test.go (TestReload_AddedUpdatedRemoved, TestReload_Idempotent); this integration test would only add cross-process signal delivery coverage.")
 }

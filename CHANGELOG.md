@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gc mail count --json` always include the resolved `recipients` array,
   including single-recipient targets.
 
+### Added
+
+- `gc supervisor secret {set,get,list,delete,reload,import-env}` subcommand tree for managing third-party API keys (EXA, Firecrawl, etc.) via OS keychain (macOS Keychain / Linux Secret Service / Windows Credential Manager / encrypted file backend).
+- `[secrets]` section in `~/.gc/supervisor.toml` for config-driven secret loading.
+- `GET /v1/supervisor/secrets/status` HTTP API endpoint returning loaded secret names and SHA-256 hashes (never values) for drift detection.
+- `gc supervisor secret list` drift detection (OK / MISSING / STALE / MISMATCH / ORPHAN status).
+
 ### Fixed
 
 - `gc session attach` now re-applies `session_live` hooks (status-bar theme,
@@ -93,7 +100,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gc session reset` now documents its named-session circuit-breaker behavior:
   when the target is a named session, reset clears a tripped respawn breaker
   before requesting a fresh restart.
-
 ### Changed
 
 - `gc converge status --json` returns the convergence metadata object with
@@ -147,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `lane_id`, `provider`, and `model` fields, and the finalizer rejects blank
   lane IDs without merging contract-invalid lane findings, evidence, or usage
   into the synthesized summary.
+- Release pipeline switched from `goreleaser-action` (CGO_ENABLED=0) to `goreleaser-cross` Docker image (CGo cross-compile) to support the new keyring backends. This affects release-build infrastructure only; `make test` and local development are unchanged.
 - `[[orders.overrides]]` rig matching is stricter and clearer. A rigless
   override (`rig` unset) still matches **only** city-level orders; if the
   named order exists only as per-rig instances, the error now names every

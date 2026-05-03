@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -113,7 +114,7 @@ type SupervisorMux struct {
 	startedAt      time.Time
 	allowedOrigins []string
 	server         *http.Server
-	secretsView    func() []string
+	secretsView    atomic.Pointer[func() []string]
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -174,10 +175,10 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 // SetSecretsView wires a function that reports the names of secrets
 // currently loaded by the supervisor's secrets.Loader. The closure is
 // evaluated on every request to GET /v1/supervisor/secrets/status; values
-// are read from os.Environ for hashing at request time, so this is safe
-// to call at any point after NewSupervisorMux returns.
+// are read from os.Environ for hashing at request time. Safe for concurrent
+// use; can be called at any point in the SupervisorMux's lifetime.
 func (sm *SupervisorMux) SetSecretsView(fn func() []string) {
-	sm.secretsView = fn
+	sm.secretsView.Store(&fn)
 }
 
 // serveCitySvcProxy forwards /v0/city/{cityName}/svc/... to the per-city
