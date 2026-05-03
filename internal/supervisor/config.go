@@ -141,6 +141,9 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	// Strict-decode: every key in supervisor.toml must be in the Config
+	// type. Unknown keys are user-actionable errors (typo, stale section
+	// from another branch).
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
 		// Surface the most-actionable case explicitly: stale CGo-branch
 		// [secrets.keychain] / [secrets.file] sections.
@@ -155,7 +158,11 @@ func LoadConfig(path string) (Config, error) {
 				)
 			}
 		}
-		return cfg, fmt.Errorf("unknown keys in %s: %v", path, undecoded)
+		parts := make([]string, len(undecoded))
+		for i, k := range undecoded {
+			parts[i] = k.String()
+		}
+		return cfg, fmt.Errorf("unknown keys in %s: %s", path, strings.Join(parts, ", "))
 	}
 	return cfg, nil
 }
