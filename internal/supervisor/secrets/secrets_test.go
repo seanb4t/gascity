@@ -15,9 +15,9 @@ import (
 func seedFileKeyring(t *testing.T, prefixes []string, items map[string]string) supervisor.SecretsConfig {
 	t.Helper()
 	cfg := fileBackendConfig(t, prefixes)
-	ring, err := openKeyring(cfg, fixedFilePrompt())
+	ring, err := OpenKeyring(cfg, fixedFilePrompt())
 	if err != nil {
-		t.Fatalf("openKeyring: %v", err)
+		t.Fatalf("OpenKeyring: %v", err)
 	}
 	for k, v := range items {
 		if err := ring.Set(keyring.Item{Key: k, Data: []byte(v)}); err != nil {
@@ -144,7 +144,7 @@ func TestReload_AddedUpdatedRemoved(t *testing.T) {
 	}
 
 	// Mutate the keyring underneath the loader.
-	ring, err := openKeyring(cfg, fixedFilePrompt())
+	ring, err := OpenKeyring(cfg, fixedFilePrompt())
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

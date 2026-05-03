@@ -16,11 +16,11 @@ const (
 	defaultAccountSuffix = "@personal"
 )
 
-// openKeyring translates a SecretsConfig into a keyring.Config and
+// OpenKeyring translates a SecretsConfig into a keyring.Config and
 // opens the appropriate backend. The promptFn is used for backends
 // that require a password (e.g., the encrypted file backend); pass
 // keyring.TerminalPrompt for production use.
-func openKeyring(cfg supervisor.SecretsConfig, promptFn keyring.PromptFunc) (keyring.Keyring, error) {
+func OpenKeyring(cfg supervisor.SecretsConfig, promptFn keyring.PromptFunc) (keyring.Keyring, error) {
 	kcfg := keyring.Config{
 		ServiceName:                    serviceName(cfg.Keychain.ServiceName),
 		KeychainName:                   "login",
