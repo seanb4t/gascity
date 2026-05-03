@@ -24,6 +24,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/supervisor"
+	supsecrets "github.com/gastownhall/gascity/internal/supervisor/secrets"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -302,6 +304,12 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Load secrets into the gc start process env before the supervisor
+	// registration flow. The supervisor loads secrets independently at its
+	// own startup; both processes call LoadAll so each has keyring secrets
+	// available in os.Environ() for any env-expansion that occurs in their
+	// respective pipelines.
+	loadStartupSecrets(context.Background(), stderr)
 	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
 		return code
 	}
@@ -478,6 +486,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// errors are logged inline by runStage1SkillMaterialization
 	// itself; it never returns a non-nil error to its caller.
 	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
+
+	// Load secrets from the keyring into the process env BEFORE MCP template
+	// expansion. Secrets set via os.Setenv are available to any subsequent
+	// env-expansion (e.g. os.ExpandEnv on agent.Env values) and to the
+	// expandEnvMap call that merges env for session starts. Failures are
+	// non-fatal — startup continues even if no supervisor.toml is present.
+	loadStartupSecrets(context.Background(), stderr)
 
 	// Stage-1 MCP projection is a hard gate because it mutates the provider's
 	// active runtime config surface. Conflicting shared targets or projection
@@ -1060,6 +1075,47 @@ func mergeEnv(maps ...map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// loadStartupSecrets loads secrets from the configured keyring backend into
+// the current process environment via os.Setenv. It mirrors the wiring that
+// runSupervisor performs: both gc start and the supervisor process independently
+// call LoadAll so each has keyring secrets available in os.Environ() before
+// any downstream env-expansion occurs (e.g. expandEnvMap on agent.Env values
+// at session-start time, or os.ExpandEnv on values that reference $VAR
+// placeholders).
+//
+// Failures are non-fatal: if supervisor.toml is absent or has no secrets
+// config, loadStartupSecrets logs nothing and returns. Keyring read errors
+// are logged to stderr but do not abort startup.
+func loadStartupSecrets(ctx context.Context, stderr io.Writer) {
+	supCfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
+	if err != nil {
+		// supervisor.toml absent or unreadable — no secrets to load.
+		return
+	}
+	if err := supCfg.Secrets.Validate(isReservedSupervisorEnvKey); err != nil {
+		fmt.Fprintf(stderr, "gc start: supervisor.toml: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	loader := supsecrets.NewLoader(secretsFilePromptFunc())
+	res, err := loader.LoadAll(ctx, supCfg.Secrets)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: secrets load failed: %v (continuing)\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if len(res.Set) > 0 {
+		fmt.Fprintf(stderr, "gc start: loaded %d secrets from keyring: %s\n", len(res.Set), strings.Join(res.Set, ", ")) //nolint:errcheck // best-effort stderr
+	}
+	for _, p := range res.Missing {
+		fmt.Fprintf(stderr, "gc start: WARN: secrets prefix %q matched zero items in keyring\n", p) //nolint:errcheck // best-effort stderr
+	}
+	for _, k := range res.Skipped {
+		fmt.Fprintf(stderr, "gc start: WARN: secret %q has empty value in keyring; skipped\n", k) //nolint:errcheck // best-effort stderr
+	}
+	for _, e := range res.Errors {
+		fmt.Fprintf(stderr, "gc start: WARN: secrets load error: %v\n", e) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // resolveRigForAgent returns the rig name for an agent based on its working
