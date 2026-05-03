@@ -170,6 +170,19 @@ Implemented as `func (c SecretsConfig) Validate(reservedKey func(string) bool) e
 
 Keychain load happens **after** config load and validation, **before** the API server binds — surfaces backend misconfiguration before any city tries to connect.
 
+### Per-command opt-in for non-supervisor entry points
+
+The supervisor process loads secrets in `runSupervisor`. Other gc entry points that perform MCP template expansion in their own process (not via the supervisor) must call `loadStartupSecrets` themselves — `MCPTemplateData` consults `os.Environ()` for keys listed in `cfg.AgentDefaults.AllowEnvOverride`, and that env needs to contain the keychain values.
+
+**Current opt-in sites:**
+- `gc start` (`cmd/gc/cmd_start.go`, `doStartStandalone`) — projects MCP for stage-1 validation.
+- `gc mcp list` (`cmd/gc/cmd_mcp.go`) — inspection command that runs the same projection.
+- `gc doctor` (`cmd/gc/cmd_doctor.go`) — `mcp-config` health check runs projection.
+
+**Why per-command, not `cobra.PersistentPreRunE`:** loading secrets on every gc invocation triggers a macOS Keychain access for every `gc version`, `gc bd ready`, etc. Each rebuild of the gc binary changes its code signature, invalidating the trusted-app ACL and producing a fresh prompt — a daily-driver-ergonomics catastrophe during dev cycles. Per-command opt-in localizes the cost to commands that actually need projection. The maintenance burden is "remember to add the call when you write a new projection-touching command" — small enough that the alternative isn't worth it.
+
+**`loadStartupSecrets` is non-fatal:** missing `supervisor.toml` returns silently; backend errors log to stderr but don't abort the caller. Safe to call from any entry point.
+
 ### `LoadAll` algorithm
 
 ```go
