@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // EnvPassphraseVar is the env var consulted first by the resolution
@@ -78,7 +80,9 @@ func resolvePassphrase(sources passphraseSources) (string, PassphraseSource, err
 	} else if ok {
 		return v, PassphraseSourceKeychain, nil
 	}
-	// TTY prompt step lands in Task 9.
+	if v, ok := promptForPassphrase(sources); ok && v != "" {
+		return v, PassphraseSourcePrompt, nil
+	}
 	return "", PassphraseSourceUnset, errPassphraseNoSources(sources.KeyfilePath)
 }
 
@@ -208,6 +212,26 @@ func keychainBootstrap(account string, logger func(format string, args ...interf
 		logger("WARN: macOS Keychain bootstrap exit %d: %s", code, strings.TrimSpace(string(stdout)))
 		return "", false, nil
 	}
+}
+
+// promptForPassphrase reads from the controlling TTY without echo.
+// Returns (passphrase, true) on success; ("", false) on non-TTY or
+// read error. Tests force NoTTY=true to bypass entirely.
+func promptForPassphrase(sources passphraseSources) (string, bool) {
+	if sources.NoTTY {
+		return "", false
+	}
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return "", false
+	}
+	fmt.Fprint(os.Stderr, "Passphrase: ")
+	bytes, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", false
+	}
+	return string(bytes), true
 }
 
 // logger returns the log function for passphraseSources, defaulting to stderr.

@@ -208,3 +208,25 @@ func TestPassphrase_KeychainBootstrapNonDarwinSkipped(t *testing.T) {
 		t.Fatalf("non-darwin must not invoke security; got calls=%v", r.calls)
 	}
 }
+
+func TestPassphrase_NonTTYNoSourcesFails(t *testing.T) {
+	t.Setenv("GC_SECRETS_PASSPHRASE", "")
+	dir := t.TempDir()
+	_, _, err := resolvePassphrase(passphraseSources{
+		KeyfilePath: filepath.Join(dir, ".secrets-passphrase"),
+		NoTTY:       true,
+	})
+	if err == nil {
+		t.Fatalf("no sources + non-TTY: want error, got nil")
+	}
+	for _, want := range []string{
+		"GC_SECRETS_PASSPHRASE",
+		"0600 keyfile",
+		"gc-supervisor-passphrase",
+		"interactively",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error must mention %q; got %v", want, err)
+		}
+	}
+}
