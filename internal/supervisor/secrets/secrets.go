@@ -50,7 +50,7 @@ func (l *Loader) LoadAll(ctx context.Context, cfg supervisor.SecretsConfig) (Res
 
 	res := Result{}
 
-	ring, err := openKeyring(cfg, l.prompt)
+	ring, err := OpenKeyring(cfg, l.prompt)
 	if err != nil {
 		return res, err
 	}
@@ -119,7 +119,7 @@ func (l *Loader) Reload(ctx context.Context, cfg supervisor.SecretsConfig) (Relo
 
 	rr := ReloadResult{}
 
-	ring, err := openKeyring(cfg, l.prompt)
+	ring, err := OpenKeyring(cfg, l.prompt)
 	if err != nil {
 		return rr, err
 	}

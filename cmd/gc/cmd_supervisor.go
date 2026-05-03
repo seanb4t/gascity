@@ -58,6 +58,7 @@ to add cities.`,
 		newSupervisorLogsCmd(stdout, stderr),
 		newSupervisorInstallCmd(stdout, stderr),
 		newSupervisorUninstallCmd(stdout, stderr),
+		newSupervisorSecretCmd(stdout, stderr),
 	)
 	return cmd
 }
