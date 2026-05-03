@@ -1,8 +1,15 @@
 package secrets
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"time"
+
+	"filippo.io/age"
 )
 
 // Store is the age-encrypted on-disk secret store. One instance per
@@ -38,3 +45,87 @@ const (
 //
 // rather than the bug-prone `time.Duration(seconds) * time.Second` form.
 var tmpSweepAge = 5 * time.Minute
+
+// Set encrypts value with the store's passphrase and writes <key>.age
+// atomically (write to <key>.age.tmp, fsync, rename). Concurrent Set
+// of distinct keys is safe; concurrent Set of the same key has
+// last-writer-wins semantics with no half-written file ever observable.
+func (s *Store) Set(key string, value []byte) error {
+	rec, err := age.NewScryptRecipient(s.passphrase)
+	if err != nil {
+		return fmt.Errorf("age recipient: %w", err)
+	}
+	tmpPath := filepath.Join(s.dir, key+tmpSuffix)
+	finalPath := filepath.Join(s.dir, key+ageSuffix)
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open tmp: %w", err)
+	}
+	defer os.Remove(tmpPath) // no-op if rename succeeded
+	w, err := age.Encrypt(f, rec)
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("age encrypt: %w", err)
+	}
+	if _, err := w.Write(value); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("age close: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("fsync: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close: %w", err)
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	// Best-effort dir.Sync for crash safety; failures here aren't fatal.
+	if dirF, err := os.Open(s.dir); err == nil {
+		_ = dirF.Sync()
+		_ = dirF.Close()
+	}
+	return nil
+}
+
+// Get decrypts <key>.age and returns its plaintext. Returns
+// ErrNotFound if the file does not exist.
+func (s *Store) Get(key string) ([]byte, error) {
+	path := filepath.Join(s.dir, key+ageSuffix)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	id, err := age.NewScryptIdentity(s.passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("age identity: %w", err)
+	}
+	r, err := age.Decrypt(f, id)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt %s: %w", key, err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		return nil, fmt.Errorf("read %s: %w", key, err)
+	}
+	return buf.Bytes(), nil
+}
+
+// Remove deletes <key>.age. Idempotent — a missing file is not an
+// error.
+func (s *Store) Remove(key string) error {
+	path := filepath.Join(s.dir, key+ageSuffix)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
