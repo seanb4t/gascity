@@ -1425,9 +1425,10 @@ func loadStartupSecrets(ctx context.Context, stderr io.Writer) {
 		fmt.Fprintf(stderr, "gc start: secrets load failed: %v (continuing)\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	if len(res.Set) > 0 {
-		fmt.Fprintf(stderr, "gc start: loaded %d secrets from keyring: %s\n", len(res.Set), strings.Join(res.Set, ", ")) //nolint:errcheck // best-effort stderr
-	}
+	// Successful loads are silent — successful normal-path operations
+	// shouldn't produce stderr noise on every gc start/mcp/doctor run.
+	// Warnings (missing/skipped/error) below remain visible because
+	// they're actionable.
 	for _, p := range res.Missing {
 		fmt.Fprintf(stderr, "gc start: WARN: secrets prefix %q matched zero items in keyring\n", p) //nolint:errcheck // best-effort stderr
 	}
