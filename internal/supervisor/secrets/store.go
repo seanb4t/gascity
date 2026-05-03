@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"filippo.io/age"
@@ -131,4 +132,36 @@ func (s *Store) Remove(key string) error {
 		return fmt.Errorf("remove %s: %w", path, err)
 	}
 	return nil
+}
+
+// Keys returns the names of secrets currently in the store. Filters
+// out the stamp sentinel and any *.age.tmp files (in-flight or
+// crashed writes). Used by the CLI's `list` command for ORPHAN drift
+// detection; not used by the Loader, which gets keys from config.
+func (s *Store) Keys() ([]string, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read dir %s: %w", s.dir, err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == stampFileName {
+			continue
+		}
+		if strings.HasSuffix(name, tmpSuffix) {
+			continue
+		}
+		if !strings.HasSuffix(name, ageSuffix) {
+			continue
+		}
+		out = append(out, strings.TrimSuffix(name, ageSuffix))
+	}
+	return out, nil
 }

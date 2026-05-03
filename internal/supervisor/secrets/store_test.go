@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -55,5 +56,41 @@ func TestStore_RemoveIdempotent(t *testing.T) {
 	}
 	if err := s.Remove("KEY"); err != nil {
 		t.Fatalf("Remove (missing) should be nil, got %v", err)
+	}
+}
+
+func TestStore_KeysFiltersTmpAndStamp(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Set("ALPHA", []byte("a")); err != nil {
+		t.Fatalf("Set ALPHA: %v", err)
+	}
+	if err := s.Set("BETA", []byte("b")); err != nil {
+		t.Fatalf("Set BETA: %v", err)
+	}
+	// Plant junk that must NOT appear in Keys output.
+	mustWrite(t, filepath.Join(s.dir, stampFileName), []byte("stamp"))
+	mustWrite(t, filepath.Join(s.dir, "GAMMA"+tmpSuffix), []byte("incomplete"))
+	mustWrite(t, filepath.Join(s.dir, "README.txt"), []byte("not a secret"))
+
+	got, err := s.Keys()
+	if err != nil {
+		t.Fatalf("Keys: %v", err)
+	}
+	sort.Strings(got)
+	want := []string{"ALPHA", "BETA"}
+	if len(got) != len(want) {
+		t.Fatalf("Keys length: want %v, got %v", want, got)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("Keys[%d]: want %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func mustWrite(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
