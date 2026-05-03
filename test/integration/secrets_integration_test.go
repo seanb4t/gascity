@@ -61,7 +61,6 @@ func TestSupervisor_LoadsSecretsAtStartup(t *testing.T) {
 		t.Fatalf("keyring.Set EXA_API_KEY: %v", err)
 	}
 
-	// Write supervisor.toml with a pinned port and the file-backend config.
 	port := reserveFreePort(t)
 	cfg := fmt.Sprintf(`[supervisor]
 port = %d
@@ -105,11 +104,8 @@ prefixes = ["EXA_API_KEY"]
 		}
 	})
 
-	// Wait for the supervisor HTTP server to be ready.
 	waitHTTP(t, baseURL+"/health", 15*time.Second)
 
-	// Query the secrets status endpoint and assert EXA_API_KEY is present
-	// with the expected SHA-256 fingerprint.
 	statusURL := baseURL + "/v1/supervisor/secrets/status"
 	resp, err := http.Get(statusURL)
 	if err != nil {
@@ -132,7 +128,6 @@ prefixes = ["EXA_API_KEY"]
 		t.Fatalf("decode secrets status: %v", err)
 	}
 
-	// Find EXA_API_KEY in the response.
 	var found bool
 	expectedHash := func() string {
 		sum := sha256.Sum256([]byte(secretValue))
@@ -154,11 +149,9 @@ prefixes = ["EXA_API_KEY"]
 	}
 }
 
-// TestSupervisor_SIGHUPReload verifies that the supervisor reloads secrets
-// when it receives SIGHUP. The assertion path requires sending a SIGHUP and
-// querying the status endpoint, which needs a small API client helper that
-// doesn't exist yet in the test suite. Scaffold is here; flesh out once the
-// helper lands.
+// TestSupervisor_SIGHUPReload verifies cross-process SIGHUP secret reload.
+// Reload logic is covered by unit tests (TestSecretsReload_RoundTrip, TestReload_*);
+// this test adds signal-delivery coverage once a shared HTTP test client exists.
 func TestSupervisor_SIGHUPReload(t *testing.T) {
-	t.Skip("TODO: flesh out SIGHUP reload assertions. Requires either (a) a generic gc API test client helper to fetch /v1/supervisor/secrets/status after SIGHUP and assert the SHA-256 changed, or (b) inlining a small HTTP client here. The Loader.Reload code path is fully covered by unit tests in cmd/gc/cmd_supervisor_lifecycle_secrets_test.go (TestSecretsReload_RoundTrip) and internal/supervisor/secrets/secrets_test.go (TestReload_AddedUpdatedRemoved, TestReload_Idempotent); this integration test would only add cross-process signal delivery coverage.")
+	t.Skip("TODO: requires a gc API test client helper to assert SHA-256 change after SIGHUP")
 }

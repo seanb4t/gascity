@@ -33,7 +33,6 @@ func setupStartSecretsTest(t *testing.T, keyName, keyVal string) supervisor.Secr
 	tomlBody := "[secrets]\nbackend = \"file\"\n\n[secrets.file]\ndir = \"" + fileDir + "\"\nprefixes = [\"" + keyName + "\"]\n"
 	writeTestSupervisorTOML(t, tomlBody)
 
-	// Seed the file backend.
 	promptFn := func(_ string) (string, error) { return startTestSecretsPassword, nil }
 	ring, err := keyring.Open(keyring.Config{
 		ServiceName:      "gc-supervisor",
@@ -56,12 +55,9 @@ func setupStartSecretsTest(t *testing.T, keyName, keyVal string) supervisor.Secr
 }
 
 // TestGCStart_LoadsSecretsBeforeMCPExpansion verifies that the gc start path
-// loads secrets from the keyring into the process environment. MCP
-// .template.toml files reference keys like {{.EXA_API_KEY}}; for those to
-// expand correctly the key must be in the process env before MCP projection
-// runs. This test exercises the loader in isolation — the same approach as
-// TestRunSupervisor_LoadsSecretsBeforeAPIBind — rather than running the full
-// doStartStandalone pipeline against a real city filesystem.
+// loads secrets from the keyring into the process environment before MCP
+// template expansion. Exercises the loader in isolation rather than the full
+// doStartStandalone pipeline.
 func TestGCStart_LoadsSecretsBeforeMCPExpansion(t *testing.T) {
 	const testKey = "TEST_SECRET_KEY_START"
 	const testVal = "gc-start-test-value"
@@ -90,8 +86,6 @@ func TestGCStart_LoadStartupSecrets_WireCheck(t *testing.T) {
 
 	_ = setupStartSecretsTest(t, testKey, testVal)
 
-	// loadStartupSecrets is the function wired into doStartStandalone.
-	// Calling it directly must populate the env var.
 	loadStartupSecrets(context.Background(), os.Stderr)
 
 	if got := os.Getenv(testKey); got != testVal {
