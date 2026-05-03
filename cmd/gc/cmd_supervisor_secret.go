@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/99designs/keyring"
 	"github.com/spf13/cobra"
@@ -300,9 +301,7 @@ func isNotFoundErr(err error) bool {
 	return os.IsNotExist(err)
 }
 
-// secretRow holds one row of "gc supervisor secret list" output. The
-// LiveStatus field is "(supervisor down)" until Task 14 wires up the
-// live supervisor query via /v1/supervisor/secrets/status.
+// secretRow holds one row of "gc supervisor secret list" output.
 type secretRow struct {
 	Name       string `json:"name"`
 	Configured bool   `json:"configured"`
@@ -313,8 +312,7 @@ type secretRow struct {
 
 // newSupervisorSecretListCmd returns the "secret list" subcommand that
 // reconciles configured prefixes against keyring contents, reporting
-// OK, MISSING, and ORPHAN rows. Live supervisor status (STALE, MISMATCH)
-// is added in Task 14 once the /v1/supervisor/secrets/status endpoint exists.
+// OK, MISSING, ORPHAN, STALE, and MISMATCH rows.
 func newSupervisorSecretListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
@@ -364,7 +362,7 @@ func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
 		inKeyring[k] = true
 	}
 
-	liveByName, liveErr := fetchLiveSupervisorSecrets()
+	liveByName, liveErr := fetchLiveSupervisorSecrets(cfg.Supervisor.PortOrDefault())
 
 	prefixes := append([]string{}, cfg.Secrets.Keychain.Prefixes...)
 	if cfg.Secrets.Backend == "file" {
@@ -443,15 +441,16 @@ type liveSecret struct {
 // fetchLiveSupervisorSecrets queries the running supervisor's
 // /v1/supervisor/secrets/status endpoint and returns a map of secret name
 // to liveSecret. The base URL is taken from GC_SUPERVISOR_API_URL when
-// set (used in tests), falling back to the supervisor's default port 8372.
-// Any network or decode error is returned as-is; callers treat a non-nil
-// error as "supervisor down" and fall back to placeholder status.
-func fetchLiveSupervisorSecrets() (map[string]liveSecret, error) {
+// set (used in tests), falling back to the configured port. Any network
+// or decode error is returned as-is; callers treat a non-nil error as
+// "supervisor down" and fall back to placeholder status.
+func fetchLiveSupervisorSecrets(port int) (map[string]liveSecret, error) {
 	base := os.Getenv("GC_SUPERVISOR_API_URL")
 	if base == "" {
-		base = fmt.Sprintf("http://127.0.0.1:%d", supervisor.Section{}.PortOrDefault())
+		base = fmt.Sprintf("http://127.0.0.1:%d", port)
 	}
-	resp, err := http.Get(base + "/v1/supervisor/secrets/status") //nolint:noctx
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(base + "/v1/supervisor/secrets/status")
 	if err != nil {
 		return nil, err
 	}
