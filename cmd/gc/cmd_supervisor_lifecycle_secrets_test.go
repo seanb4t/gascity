@@ -5,7 +5,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/99designs/keyring"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/supervisor/secrets"
 )
@@ -15,35 +14,32 @@ import (
 // covered by the integration test in test/integration/secrets_integration_test.go.
 func TestRunSupervisor_LoadsSecretsBeforeAPIBind(t *testing.T) {
 	if v, ok := os.LookupEnv("EXA_API_KEY"); ok {
-		t.Cleanup(func() { os.Setenv("EXA_API_KEY", v) })    //nolint:errcheck,tenv
+		t.Cleanup(func() { os.Setenv("EXA_API_KEY", v) }) //nolint:errcheck,tenv
 	} else {
 		t.Cleanup(func() { os.Unsetenv("EXA_API_KEY") }) //nolint:tenv
 	}
 	os.Unsetenv("EXA_API_KEY") //nolint:tenv
 
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(secrets.EnvPassphraseVar, "test-pw")
+
+	storeDir := t.TempDir()
 	cfg := supervisor.SecretsConfig{
-		Backend: "file",
-		File: supervisor.FileBackendConfig{
-			Dir:      t.TempDir(),
-			Prefixes: []string{"EXA_API_KEY"},
+		Age: supervisor.AgeBackendConfig{
+			Dir:  storeDir,
+			Keys: []string{"EXA_API_KEY"},
 		},
 	}
-	promptFn := func(_ string) (string, error) { return "test-pw", nil }
 
-	ring, err := keyring.Open(keyring.Config{
-		ServiceName:      "gc-supervisor",
-		AllowedBackends:  []keyring.BackendType{keyring.FileBackend},
-		FileDir:          cfg.File.Dir,
-		FilePasswordFunc: promptFn,
-	})
+	store, err := secrets.Open(cfg.Age)
 	if err != nil {
-		t.Fatalf("seed open: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
-	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("from-secrets")}); err != nil {
-		t.Fatalf("seed set: %v", err)
+	if err := store.Set("EXA_API_KEY", []byte("from-secrets")); err != nil {
+		t.Fatalf("Set: %v", err)
 	}
 
-	loader := secrets.NewLoader(promptFn)
+	loader := secrets.NewLoader()
 	res, err := loader.LoadAll(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
@@ -58,32 +54,29 @@ func TestRunSupervisor_LoadsSecretsBeforeAPIBind(t *testing.T) {
 
 func TestSecretsReload_RoundTrip(t *testing.T) {
 	if v, ok := os.LookupEnv("EXA_API_KEY"); ok {
-		t.Cleanup(func() { os.Setenv("EXA_API_KEY", v) })    //nolint:errcheck,tenv
+		t.Cleanup(func() { os.Setenv("EXA_API_KEY", v) }) //nolint:errcheck,tenv
 	} else {
 		t.Cleanup(func() { os.Unsetenv("EXA_API_KEY") }) //nolint:tenv
 	}
 	os.Unsetenv("EXA_API_KEY") //nolint:tenv
 
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(secrets.EnvPassphraseVar, "pw")
+
+	storeDir := t.TempDir()
 	cfg := supervisor.SecretsConfig{
-		Backend: "file",
-		File: supervisor.FileBackendConfig{
-			Dir:      t.TempDir(),
-			Prefixes: []string{"EXA_API_KEY"},
+		Age: supervisor.AgeBackendConfig{
+			Dir:  storeDir,
+			Keys: []string{"EXA_API_KEY"},
 		},
 	}
-	promptFn := func(_ string) (string, error) { return "pw", nil }
-	loader := secrets.NewLoader(promptFn)
+	loader := secrets.NewLoader()
 
-	ring, err := keyring.Open(keyring.Config{
-		ServiceName:      "gc-supervisor",
-		AllowedBackends:  []keyring.BackendType{keyring.FileBackend},
-		FileDir:          cfg.File.Dir,
-		FilePasswordFunc: promptFn,
-	})
+	store, err := secrets.Open(cfg.Age)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("v1")}); err != nil {
+	if err := store.Set("EXA_API_KEY", []byte("v1")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loader.LoadAll(context.Background(), cfg); err != nil {
@@ -93,7 +86,7 @@ func TestSecretsReload_RoundTrip(t *testing.T) {
 		t.Fatal("setup")
 	}
 
-	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("v2")}); err != nil {
+	if err := store.Set("EXA_API_KEY", []byte("v2")); err != nil {
 		t.Fatal(err)
 	}
 	rr, err := loader.Reload(context.Background(), cfg)

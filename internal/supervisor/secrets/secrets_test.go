@@ -6,21 +6,29 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/99designs/keyring"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
-// seedFileKeyring populates a fresh file-backend keyring with the
-// given items and returns the SecretsConfig pointed at it.
-func seedFileKeyring(t *testing.T, prefixes []string, items map[string]string) supervisor.SecretsConfig {
+// seedAgeStore populates a fresh age-backed store with the given items
+// and returns the SecretsConfig pointed at it. The keys list controls
+// what the Loader will read back.
+func seedAgeStore(t *testing.T, keys []string, items map[string]string) supervisor.SecretsConfig {
 	t.Helper()
-	cfg := fileBackendConfig(t, prefixes)
-	ring, err := OpenKeyring(cfg, fixedFilePrompt())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(EnvPassphraseVar, "test-pass")
+	dir := t.TempDir()
+	cfg := supervisor.SecretsConfig{
+		Age: supervisor.AgeBackendConfig{
+			Dir:  dir,
+			Keys: keys,
+		},
+	}
+	store, err := Open(cfg.Age)
 	if err != nil {
-		t.Fatalf("OpenKeyring: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	for k, v := range items {
-		if err := ring.Set(keyring.Item{Key: k, Data: []byte(v)}); err != nil {
+		if err := store.Set(k, []byte(v)); err != nil {
 			t.Fatalf("Set %s: %v", k, err)
 		}
 	}
@@ -37,9 +45,9 @@ func scrubEnv(t *testing.T, names ...string) {
 	})
 }
 
-func TestLoadAll_EmptyKeyring(t *testing.T) {
-	cfg := seedFileKeyring(t, []string{"EXA_API_KEY"}, nil)
-	loader := NewLoader(fixedFilePrompt())
+func TestLoadAll_EmptyStore(t *testing.T) {
+	cfg := seedAgeStore(t, []string{"EXA_API_KEY"}, nil)
+	loader := NewLoader()
 	res, err := loader.LoadAll(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
@@ -54,10 +62,10 @@ func TestLoadAll_EmptyKeyring(t *testing.T) {
 
 func TestLoadAll_ExactMatch(t *testing.T) {
 	scrubEnv(t, "EXA_API_KEY")
-	cfg := seedFileKeyring(t, []string{"EXA_API_KEY"}, map[string]string{
+	cfg := seedAgeStore(t, []string{"EXA_API_KEY"}, map[string]string{
 		"EXA_API_KEY": "sk-real",
 	})
-	loader := NewLoader(fixedFilePrompt())
+	loader := NewLoader()
 	res, err := loader.LoadAll(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
@@ -73,14 +81,14 @@ func TestLoadAll_ExactMatch(t *testing.T) {
 	}
 }
 
-func TestLoadAll_PrefixMatchesMultiple(t *testing.T) {
+func TestLoadAll_MultipleKeys(t *testing.T) {
 	scrubEnv(t, "LINEAR_TOKEN", "LINEAR_REFRESH_TOKEN")
-	cfg := seedFileKeyring(t, []string{"LINEAR_"}, map[string]string{
+	cfg := seedAgeStore(t, []string{"LINEAR_TOKEN", "LINEAR_REFRESH_TOKEN"}, map[string]string{
 		"LINEAR_TOKEN":         "tok-1",
 		"LINEAR_REFRESH_TOKEN": "tok-2",
 		"OTHER_KEY":            "ignored",
 	})
-	loader := NewLoader(fixedFilePrompt())
+	loader := NewLoader()
 	res, err := loader.LoadAll(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
@@ -90,7 +98,7 @@ func TestLoadAll_PrefixMatchesMultiple(t *testing.T) {
 			os.Getenv("LINEAR_TOKEN"), os.Getenv("LINEAR_REFRESH_TOKEN"))
 	}
 	if os.Getenv("OTHER_KEY") != "" {
-		t.Errorf("OTHER_KEY env = %q, want empty (not in prefix)", os.Getenv("OTHER_KEY"))
+		t.Errorf("OTHER_KEY env = %q, want empty (not in keys)", os.Getenv("OTHER_KEY"))
 	}
 	sort.Strings(res.Set)
 	want := []string{"LINEAR_REFRESH_TOKEN", "LINEAR_TOKEN"}
@@ -101,10 +109,10 @@ func TestLoadAll_PrefixMatchesMultiple(t *testing.T) {
 
 func TestLoadAll_EmptyValueSkipped(t *testing.T) {
 	scrubEnv(t, "FIRECRAWL_KEY")
-	cfg := seedFileKeyring(t, []string{"FIRECRAWL_KEY"}, map[string]string{
+	cfg := seedAgeStore(t, []string{"FIRECRAWL_KEY"}, map[string]string{
 		"FIRECRAWL_KEY": "",
 	})
-	loader := NewLoader(fixedFilePrompt())
+	loader := NewLoader()
 	res, err := loader.LoadAll(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("LoadAll: %v", err)
@@ -131,11 +139,11 @@ func equalStringSlices(a, b []string) bool {
 
 func TestReload_AddedUpdatedRemoved(t *testing.T) {
 	scrubEnv(t, "EXA_API_KEY", "FIRECRAWL_KEY", "LINEAR_TOKEN")
-	cfg := seedFileKeyring(t, []string{"EXA_API_KEY", "FIRECRAWL_KEY", "LINEAR_"}, map[string]string{
+	cfg := seedAgeStore(t, []string{"EXA_API_KEY", "FIRECRAWL_KEY", "LINEAR_TOKEN"}, map[string]string{
 		"EXA_API_KEY":  "v1",
 		"LINEAR_TOKEN": "tok-v1",
 	})
-	loader := NewLoader(fixedFilePrompt())
+	loader := NewLoader()
 	if _, err := loader.LoadAll(context.Background(), cfg); err != nil {
 		t.Fatalf("initial LoadAll: %v", err)
 	}
@@ -143,18 +151,18 @@ func TestReload_AddedUpdatedRemoved(t *testing.T) {
 		t.Fatalf("setup: EXA_API_KEY = %q, want v1", os.Getenv("EXA_API_KEY"))
 	}
 
-	// Mutate the keyring underneath the loader.
-	ring, err := OpenKeyring(cfg, fixedFilePrompt())
+	// Mutate the store underneath the loader.
+	store, err := Open(cfg.Age)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("v2")}); err != nil {
+	if err := store.Set("EXA_API_KEY", []byte("v2")); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if err := ring.Set(keyring.Item{Key: "FIRECRAWL_KEY", Data: []byte("new")}); err != nil {
+	if err := store.Set("FIRECRAWL_KEY", []byte("new")); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if err := ring.Remove("LINEAR_TOKEN"); err != nil {
+	if err := store.Remove("LINEAR_TOKEN"); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 
@@ -186,10 +194,10 @@ func TestReload_AddedUpdatedRemoved(t *testing.T) {
 
 func TestReload_Idempotent(t *testing.T) {
 	scrubEnv(t, "EXA_API_KEY")
-	cfg := seedFileKeyring(t, []string{"EXA_API_KEY"}, map[string]string{
+	cfg := seedAgeStore(t, []string{"EXA_API_KEY"}, map[string]string{
 		"EXA_API_KEY": "v1",
 	})
-	loader := NewLoader(fixedFilePrompt())
+	loader := NewLoader()
 	if _, err := loader.LoadAll(context.Background(), cfg); err != nil {
 		t.Fatalf("LoadAll: %v", err)
 	}
@@ -204,11 +212,11 @@ func TestReload_Idempotent(t *testing.T) {
 
 func TestNames(t *testing.T) {
 	scrubEnv(t, "EXA_API_KEY", "LINEAR_TOKEN")
-	cfg := seedFileKeyring(t, []string{"EXA_API_KEY", "LINEAR_TOKEN"}, map[string]string{
+	cfg := seedAgeStore(t, []string{"EXA_API_KEY", "LINEAR_TOKEN"}, map[string]string{
 		"EXA_API_KEY":  "v",
 		"LINEAR_TOKEN": "v",
 	})
-	loader := NewLoader(fixedFilePrompt())
+	loader := NewLoader()
 	if got := loader.Names(); len(got) != 0 {
 		t.Errorf("Names() before LoadAll = %v, want empty", got)
 	}
@@ -230,4 +238,3 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
-

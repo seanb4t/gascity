@@ -13,7 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/99designs/keyring"
+	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/supervisor/secrets"
 )
 
 // hexsha returns the hex-encoded SHA-256 digest of s.
@@ -22,22 +23,51 @@ func hexsha(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// useFixedSecretPrompt replaces secretPromptFn with a deterministic
-// password function so the file backend does not prompt interactively.
-// It restores the original on test cleanup.
-func useFixedSecretPrompt(t *testing.T) {
+// seedTestStore opens an age-encrypted store at a fresh temp dir,
+// writes the given items into it, and returns a supervisor.Config with
+// Secrets.Age.Dir/Keys populated. Test env (GC_HOME +
+// GC_SECRETS_PASSPHRASE) is configured via t.Setenv so subsequent CLI
+// commands open the same store with the same passphrase.
+func seedTestStore(t *testing.T, items map[string]string) supervisor.Config {
 	t.Helper()
-	orig := secretPromptFn
-	secretPromptFn = func(_ string) (string, error) { return "test-password", nil }
-	t.Cleanup(func() { secretPromptFn = orig })
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(secrets.EnvPassphraseVar, "test-pass")
+	dir := t.TempDir()
+	keys := make([]string, 0, len(items))
+	for k := range items {
+		keys = append(keys, k)
+	}
+	cfg := supervisor.Config{
+		Secrets: supervisor.SecretsConfig{
+			Age: supervisor.AgeBackendConfig{
+				Dir:  dir,
+				Keys: keys,
+			},
+		},
+	}
+	store, err := secrets.Open(cfg.Secrets.Age)
+	if err != nil {
+		t.Fatalf("secrets.Open: %v", err)
+	}
+	for k, v := range items {
+		if err := store.Set(k, []byte(v)); err != nil {
+			t.Fatalf("Set %s: %v", k, err)
+		}
+	}
+	return cfg
 }
 
-// writeTestSupervisorTOML drops a minimal supervisor.toml in a temp
-// home and returns the path so subcommand tests can read it.
+// writeTestSupervisorTOML drops a minimal supervisor.toml in $GC_HOME
+// (which the caller is expected to have set) and returns the path so
+// subcommand tests can read it. The body must already reflect the
+// store dir / keys to match a previously-seeded store.
 func writeTestSupervisorTOML(t *testing.T, body string) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("GC_HOME", home)
+	home := os.Getenv("GC_HOME")
+	if home == "" {
+		home = t.TempDir()
+		t.Setenv("GC_HOME", home)
+	}
 	cfgPath := filepath.Join(home, "supervisor.toml")
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -45,16 +75,20 @@ func writeTestSupervisorTOML(t *testing.T, body string) string {
 	return cfgPath
 }
 
+// writeSupervisorTOMLForStore writes a supervisor.toml whose
+// [secrets.age] section points at the seeded store from cfg.
+func writeSupervisorTOMLForStore(t *testing.T, cfg supervisor.Config) {
+	t.Helper()
+	body := "[secrets.age]\ndir = \"" + cfg.Secrets.Age.Dir + "\"\nkeys = [" + quotedList(cfg.Secrets.Age.Keys) + "]\n"
+	writeTestSupervisorTOML(t, body)
+}
+
 func TestSecretSet_FromStdin(t *testing.T) {
-	useFixedSecretPrompt(t)
-	dir := t.TempDir()
-	writeTestSupervisorTOML(t, `
-[secrets]
-backend = "file"
-[secrets.file]
-dir = "`+dir+`"
-prefixes = ["EXA_API_KEY"]
-`)
+	cfg := seedTestStore(t, map[string]string{"EXA_API_KEY": ""})
+	// Re-seed empty so the set command writes the actual value.
+	cfg.Secrets.Age.Keys = []string{"EXA_API_KEY"}
+	writeSupervisorTOMLForStore(t, cfg)
+
 	var stdout, stderr bytes.Buffer
 	cmd := newSupervisorSecretSetCmd(&stdout, &stderr)
 	cmd.SetArgs([]string{"EXA_API_KEY", "--from-stdin"})
@@ -75,15 +109,11 @@ prefixes = ["EXA_API_KEY"]
 }
 
 func TestSecretGet_NotFound(t *testing.T) {
-	useFixedSecretPrompt(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(secrets.EnvPassphraseVar, "test-pass")
 	dir := t.TempDir()
-	writeTestSupervisorTOML(t, `
-[secrets]
-backend = "file"
-[secrets.file]
-dir = "`+dir+`"
-prefixes = ["EXA_API_KEY"]
-`)
+	writeTestSupervisorTOML(t, "[secrets.age]\ndir = \""+dir+"\"\nkeys = [\"EXA_API_KEY\"]\n")
+
 	var stdout, stderr bytes.Buffer
 	cmd := newSupervisorSecretGetCmd(&stdout, &stderr)
 	cmd.SetArgs([]string{"EXA_API_KEY"})
@@ -97,15 +127,11 @@ prefixes = ["EXA_API_KEY"]
 }
 
 func TestSecretDelete_Idempotent(t *testing.T) {
-	useFixedSecretPrompt(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(secrets.EnvPassphraseVar, "test-pass")
 	dir := t.TempDir()
-	writeTestSupervisorTOML(t, `
-[secrets]
-backend = "file"
-[secrets.file]
-dir = "`+dir+`"
-prefixes = ["EXA_API_KEY"]
-`)
+	writeTestSupervisorTOML(t, "[secrets.age]\ndir = \""+dir+"\"\nkeys = [\"EXA_API_KEY\"]\n")
+
 	var stdout, stderr bytes.Buffer
 	cmd := newSupervisorSecretDeleteCmd(&stdout, &stderr)
 	cmd.SetArgs([]string{"EXA_API_KEY", "--force"})
@@ -115,6 +141,7 @@ prefixes = ["EXA_API_KEY"]
 }
 
 func TestSecretReload_NoSupervisor(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
 	writeTestSupervisorTOML(t, `[secrets]`)
 	var stdout, stderr bytes.Buffer
 	cmd := newSupervisorSecretReloadCmd(&stdout, &stderr)
@@ -129,15 +156,10 @@ func TestSecretReload_NoSupervisor(t *testing.T) {
 }
 
 func TestSecretImportEnv_HappyPath(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(secrets.EnvPassphraseVar, "test-pass")
 	dir := t.TempDir()
-	writeTestSupervisorTOML(t, `
-[secrets]
-backend = "file"
-[secrets.file]
-dir = "`+dir+`"
-prefixes = []
-`)
-	useFixedSecretPrompt(t)
+	writeTestSupervisorTOML(t, "[secrets.age]\ndir = \""+dir+"\"\nkeys = []\n")
 	t.Setenv("GC_SUPERVISOR_ENV", "FOO_KEY,BAR_TOKEN")
 	t.Setenv("FOO_KEY", "foo-val")
 	t.Setenv("BAR_TOKEN", "bar-val")
@@ -149,25 +171,27 @@ prefixes = []
 		t.Fatalf("Execute: %v", err)
 	}
 
-	promptFn := func(_ string) (string, error) { return "test-password", nil }
-	ring, _ := keyring.Open(keyring.Config{
-		ServiceName: "gc-supervisor", AllowedBackends: []keyring.BackendType{keyring.FileBackend},
-		FileDir: dir, FilePasswordFunc: promptFn,
-	})
-	keys, _ := ring.Keys()
+	store, err := secrets.Open(supervisor.AgeBackendConfig{Dir: dir})
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	keys, err := store.Keys()
+	if err != nil {
+		t.Fatalf("Keys: %v", err)
+	}
 	sort.Strings(keys)
 	want := []string{"BAR_TOKEN", "FOO_KEY"}
 	if strings.Join(keys, ",") != strings.Join(want, ",") {
-		t.Errorf("keyring contents = %v, want %v", keys, want)
+		t.Errorf("store contents = %v, want %v", keys, want)
 	}
 
-	if !strings.Contains(stdout.String(), "[secrets.file]") || !strings.Contains(stdout.String(), "FOO_KEY") {
+	if !strings.Contains(stdout.String(), "[secrets.age]") || !strings.Contains(stdout.String(), "FOO_KEY") {
 		t.Errorf("suggested TOML missing from stdout:\n%s", stdout.String())
 	}
 }
 
 func TestSecretList_LiveSupervisorDimension(t *testing.T) {
-	secrets := []map[string]any{
+	liveSecrets := []map[string]any{
 		{"name": "EXA_API_KEY", "length": 11, "sha256": hexsha("hello-world")},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,27 +199,14 @@ func TestSecretList_LiveSupervisorDimension(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"secrets": secrets})
+		json.NewEncoder(w).Encode(map[string]any{"secrets": liveSecrets})
 	}))
 	t.Cleanup(srv.Close)
 
-	dir := t.TempDir()
-	writeTestSupervisorTOML(t, `
-[supervisor]
-port = 0
-[secrets]
-backend = "file"
-[secrets.file]
-dir = "`+dir+`"
-prefixes = ["EXA_API_KEY"]
-`)
-	useFixedSecretPrompt(t)
-	promptFn := func(_ string) (string, error) { return "test-password", nil }
-	ring, _ := keyring.Open(keyring.Config{
-		ServiceName: "gc-supervisor", AllowedBackends: []keyring.BackendType{keyring.FileBackend},
-		FileDir: dir, FilePasswordFunc: promptFn,
-	})
-	ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("hello-world")})
+	cfg := seedTestStore(t, map[string]string{"EXA_API_KEY": "hello-world"})
+	cfg.Secrets.Age.Keys = []string{"EXA_API_KEY"}
+	body := "[supervisor]\nport = 0\n[secrets.age]\ndir = \"" + cfg.Secrets.Age.Dir + "\"\nkeys = [\"EXA_API_KEY\"]\n"
+	writeTestSupervisorTOML(t, body)
 
 	t.Setenv("GC_SUPERVISOR_API_URL", srv.URL)
 
@@ -212,35 +223,13 @@ prefixes = ["EXA_API_KEY"]
 
 func TestSecretList_DriftDetection(t *testing.T) {
 	t.Setenv("GC_SUPERVISOR_API_URL", "http://127.0.0.1:1") // hermetic against any real supervisor on default port
-	dir := t.TempDir()
-	writeTestSupervisorTOML(t, `
-[secrets]
-backend = "file"
-[secrets.file]
-dir = "`+dir+`"
-prefixes = ["EXA_API_KEY", "FIRECRAWL_KEY", "LINEAR_TOKEN"]
-`)
-	useFixedSecretPrompt(t)
-
-	promptFn := func(_ string) (string, error) { return "test-password", nil }
-	ring, err := keyring.Open(keyring.Config{
-		ServiceName:      "gc-supervisor",
-		AllowedBackends:  []keyring.BackendType{keyring.FileBackend},
-		FileDir:          dir,
-		FilePasswordFunc: promptFn,
+	cfg := seedTestStore(t, map[string]string{
+		"EXA_API_KEY":  "v",
+		"LINEAR_TOKEN": "v",
+		"ORPHAN_KEY":   "v",
 	})
-	if err != nil {
-		t.Fatalf("open ring: %v", err)
-	}
-	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("v")}); err != nil {
-		t.Fatalf("set EXA_API_KEY: %v", err)
-	}
-	if err := ring.Set(keyring.Item{Key: "LINEAR_TOKEN", Data: []byte("v")}); err != nil {
-		t.Fatalf("set LINEAR_TOKEN: %v", err)
-	}
-	if err := ring.Set(keyring.Item{Key: "ORPHAN_KEY", Data: []byte("v")}); err != nil {
-		t.Fatalf("set ORPHAN_KEY: %v", err)
-	}
+	body := "[secrets.age]\ndir = \"" + cfg.Secrets.Age.Dir + "\"\nkeys = [\"EXA_API_KEY\", \"FIRECRAWL_KEY\", \"LINEAR_TOKEN\"]\n"
+	writeTestSupervisorTOML(t, body)
 
 	var stdout, stderr bytes.Buffer
 	cmd := newSupervisorSecretListCmd(&stdout, &stderr)

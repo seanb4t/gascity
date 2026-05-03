@@ -1,3 +1,5 @@
+// Package secrets provides config-driven secret loading for the gc
+// supervisor. See engdocs/design/supervisor-secrets-v0.md.
 package secrets
 
 import (
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 // Store is the age-encrypted on-disk secret store. One instance per
@@ -47,27 +50,42 @@ const (
 // rather than the bug-prone `time.Duration(seconds) * time.Second` form.
 var tmpSweepAge = 5 * time.Minute
 
-// AgeConfigForTest is the test-only minimal config used by
-// openWithPassphrase. Production Open (Task 11) takes the real
-// supervisor.AgeBackendConfig.
-type AgeConfigForTest struct {
-	Dir string
-}
-
-// openWithPassphrase constructs a *Store, sweeps stale *.age.tmp
-// files, then enforces the stamp invariants per the Open() matrix in
-// engdocs/design/supervisor-secrets-v0.md:
+// Open returns an age-backed *Store ready for Get/Set/Remove/Keys.
+// It resolves the passphrase via the env→keyfile→Keychain→TTY chain,
+// sweeps stale *.age.tmp files, and enforces the stamp invariants
+// matrix from engdocs/design/supervisor-secrets-v0.md.
 //
-//	hasSecrets=no, stamp=no   -> eager-write stamp, proceed
-//	hasSecrets=yes, stamp=yes -> verifies (Task 6)
-//	hasSecrets=yes, stamp=no  -> hard error (Task 6)
-//
-// Production Open() (Task 11) wraps this with passphrase resolution.
-func openWithPassphrase(cfg AgeConfigForTest, passphrase string) (*Store, error) {
-	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create %s: %w", cfg.Dir, err)
+// Defaults computed from cfg.Dir / cfg.PassphraseFile / cfg.PassphraseKeychainAccount
+// when those fields are empty. Default Dir / PassphraseFile use
+// supervisor.DefaultHome() — which panics in test binaries unless
+// GC_HOME is set. Tests must either pass cfg.Dir explicitly OR set
+// t.Setenv("GC_HOME", t.TempDir()) before calling Open.
+func Open(cfg supervisor.AgeBackendConfig) (*Store, error) {
+	dir := cfg.Dir
+	if dir == "" {
+		dir = filepath.Join(supervisor.DefaultHome(), "secrets")
 	}
-	s := &Store{dir: cfg.Dir, passphrase: passphrase}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create %s: %w", dir, err)
+	}
+	keyfile := cfg.PassphraseFile
+	if keyfile == "" {
+		keyfile = filepath.Join(supervisor.DefaultHome(), ".secrets-passphrase")
+	}
+	account := cfg.PassphraseKeychainAccount
+	if account == "" {
+		if u := os.Getenv("USER"); u != "" {
+			account = u + "@personal"
+		}
+	}
+	passphrase, _, err := resolvePassphrase(passphraseSources{
+		KeyfilePath:     keyfile,
+		KeychainAccount: account,
+	})
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{dir: dir, passphrase: passphrase}
 	if err := s.sweepStaleTmps(); err != nil {
 		return nil, err
 	}

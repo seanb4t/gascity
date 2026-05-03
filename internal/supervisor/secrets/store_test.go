@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 // newTestStore returns a *Store rooted at t.TempDir() with a fixed
@@ -133,13 +135,14 @@ func TestStore_StaleTmpSweptAtOpen(t *testing.T) {
 	}
 }
 
-// openForTest is a thin wrapper around openWithPassphrase that takes a
-// passphrase directly, bypassing the resolution chain. The production
-// Open() signature does its own resolution; we'll add it in Task 11.
-// Until then, openForTest is a private helper used by store_test.go.
+// openForTest wraps the production Open() by setting GC_HOME to a
+// scratch dir (so DefaultHome() doesn't panic) and the passphrase env
+// (so resolvePassphrase short-circuits to PassphraseSourceEnv).
 func openForTest(t *testing.T, dir, passphrase string) (*Store, error) {
 	t.Helper()
-	return openWithPassphrase(AgeConfigForTest{Dir: dir}, passphrase)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(EnvPassphraseVar, passphrase)
+	return Open(supervisor.AgeBackendConfig{Dir: dir})
 }
 
 func TestStore_OpenWithWrongPassphraseFailsAtStamp(t *testing.T) {

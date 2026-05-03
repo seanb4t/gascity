@@ -997,16 +997,16 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor.toml: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	secretsLoader = secrets.NewLoader(secrets.EnvPasswordPromptFunc())
+	secretsLoader = secrets.NewLoader()
 	secResult, secErr := secretsLoader.LoadAll(ctx, supCfg.Secrets)
 	if secErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: secrets load failed: %v (continuing without loaded secrets)\n", secErr) //nolint:errcheck
 	} else {
-		for _, p := range secResult.Missing {
-			fmt.Fprintf(stderr, "gc supervisor: WARN: secrets prefix %q matched zero items in keyring\n", p) //nolint:errcheck
+		for _, k := range secResult.Missing {
+			fmt.Fprintf(stderr, "gc supervisor: WARN: secrets key %q not present in age store\n", k) //nolint:errcheck
 		}
 		for _, k := range secResult.Skipped {
-			fmt.Fprintf(stderr, "gc supervisor: WARN: secret %q has empty value in keyring; skipped\n", k) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc supervisor: WARN: secret %q has empty value in age store; skipped\n", k) //nolint:errcheck
 		}
 		for _, e := range secResult.Errors {
 			fmt.Fprintf(stderr, "gc supervisor: WARN: secrets load error: %v\n", e) //nolint:errcheck
@@ -1032,16 +1032,8 @@ func runSupervisor(stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "supervisor: SIGHUP: secrets validation failed: %v (keeping previous secrets)\n", err) //nolint:errcheck
 				continue
 			}
-			// Backend swap requires restart; warn and keep going with the
-			// existing backend by ignoring backend changes.
-			supCfgMu.RLock()
-			prevBackend := supCfg.Secrets.Backend
-			supCfgMu.RUnlock()
-			if newCfg.Secrets.Backend != prevBackend {
-				fmt.Fprintf(stderr, "supervisor: SIGHUP: WARN: backend change %q -> %q ignored; restart to apply\n",
-					prevBackend, newCfg.Secrets.Backend) //nolint:errcheck
-				newCfg.Secrets.Backend = prevBackend
-			}
+			// Age store dir / passphrase changes are honored on reload;
+			// passphrase resolution happens inside the loader.
 			rr, err := secretsLoader.Reload(context.Background(), newCfg.Secrets)
 			if err != nil {
 				fmt.Fprintf(stderr, "supervisor: SIGHUP: secrets reload failed: %v\n", err) //nolint:errcheck

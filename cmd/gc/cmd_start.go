@@ -1409,17 +1409,17 @@ func loadStartupSecrets(ctx context.Context, stderr io.Writer) {
 		fmt.Fprintf(stderr, "gc start: supervisor.toml: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	loader := supsecrets.NewLoader(supsecrets.EnvPasswordPromptFunc())
+	loader := supsecrets.NewLoader()
 	res, err := loader.LoadAll(ctx, supCfg.Secrets)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: secrets load failed: %v (continuing)\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	for _, p := range res.Missing {
-		fmt.Fprintf(stderr, "gc start: WARN: secrets prefix %q matched zero items in keyring\n", p) //nolint:errcheck // best-effort stderr
+	for _, k := range res.Missing {
+		fmt.Fprintf(stderr, "gc start: WARN: secrets key %q not present in age store\n", k) //nolint:errcheck // best-effort stderr
 	}
 	for _, k := range res.Skipped {
-		fmt.Fprintf(stderr, "gc start: WARN: secret %q has empty value in keyring; skipped\n", k) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc start: WARN: secret %q has empty value in age store; skipped\n", k) //nolint:errcheck // best-effort stderr
 	}
 	for _, e := range res.Errors {
 		fmt.Fprintf(stderr, "gc start: WARN: secrets load error: %v\n", e) //nolint:errcheck // best-effort stderr

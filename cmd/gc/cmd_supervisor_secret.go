@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/99designs/keyring"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -22,16 +21,12 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor/secrets"
 )
 
-// secretPromptFn is the keyring password prompt used by the secret
-// subcommands. Tests override this to avoid interactive prompts.
-var secretPromptFn = keyring.TerminalPrompt
-
 // newSupervisorSecretCmd returns the "secret" subcommand tree for
-// managing secrets stored in the configured backend.
+// managing secrets stored in the age-encrypted store.
 func newSupervisorSecretCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "secret",
-		Short: "Manage supervisor secrets stored in the configured backend",
+		Short: "Manage supervisor secrets stored in the age-encrypted store",
 		Long:  `Manage secrets that the supervisor loads at startup. See engdocs/design/supervisor-secrets-v0.md.`,
 	}
 	cmd.AddCommand(newSupervisorSecretSetCmd(stdout, stderr))
@@ -44,14 +39,14 @@ func newSupervisorSecretCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // newSupervisorSecretSetCmd returns the "secret set" subcommand that
-// stores a named secret in the configured backend. The value is read
-// from a no-echo terminal prompt by default, or from stdin when
-// --from-stdin is set.
+// stores a named secret in the age store. The value is read from a
+// no-echo terminal prompt by default, or from stdin when --from-stdin
+// is set.
 func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fromStdin bool
 	cmd := &cobra.Command{
 		Use:   "set <NAME>",
-		Short: "Store a secret in the configured backend",
+		Short: "Store a secret in the age-encrypted store",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			name := args[0]
@@ -59,7 +54,7 @@ func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ring, err := openSecretRing(cfg)
+			store, err := openSecretStore(cfg)
 			if err != nil {
 				return err
 			}
@@ -67,7 +62,7 @@ func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return ring.Set(keyring.Item{Key: name, Data: []byte(value)})
+			return store.Set(name, []byte(value))
 		},
 	}
 	cmd.Flags().BoolVar(&fromStdin, "from-stdin", false, "read value from stdin instead of prompting")
@@ -88,18 +83,18 @@ func newSupervisorSecretGetCmd(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ring, err := openSecretRing(cfg)
+			store, err := openSecretStore(cfg)
 			if err != nil {
 				return err
 			}
-			item, err := ring.Get(args[0])
+			data, err := store.Get(args[0])
 			if err != nil {
 				if !quiet {
 					fmt.Fprintf(stderr, "secret %q: %v\n", args[0], err)
 				}
 				return errExit
 			}
-			fmt.Fprint(stdout, string(item.Data))
+			fmt.Fprint(stdout, string(data))
 			return nil
 		},
 	}
@@ -108,21 +103,21 @@ func newSupervisorSecretGetCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // newSupervisorSecretDeleteCmd returns the "secret delete" subcommand
-// that removes a named secret from the configured backend. The
-// operation is idempotent: deleting a name that does not exist
-// succeeds silently. Requires --force or interactive confirmation.
+// that removes a named secret from the age store. The operation is
+// idempotent: deleting a name that does not exist succeeds silently.
+// Requires --force or interactive confirmation.
 func newSupervisorSecretDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "delete <NAME>",
-		Short: "Remove a secret from the configured backend",
+		Short: "Remove a secret from the age-encrypted store",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			cfg, err := loadSupervisorConfigForSecrets()
 			if err != nil {
 				return err
 			}
-			ring, err := openSecretRing(cfg)
+			store, err := openSecretStore(cfg)
 			if err != nil {
 				return err
 			}
@@ -131,7 +126,7 @@ func newSupervisorSecretDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
 					return nil
 				}
 			}
-			if err := ring.Remove(args[0]); err != nil && !isNotFoundErr(err) {
+			if err := store.Remove(args[0]); err != nil && !isNotFoundErr(err) {
 				return err
 			}
 			return nil
@@ -169,23 +164,22 @@ func newSupervisorSecretReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 
 // newSupervisorSecretImportEnvCmd returns the "secret import-env" subcommand
 // that reads each key listed in $GC_SUPERVISOR_ENV from the current shell
-// environment, writes it to the configured backend, and prints a suggested
-// prefixes block for supervisor.toml.
+// environment, writes it to the age store, and prints a suggested
+// [secrets.age] keys = [...] block for supervisor.toml.
 func newSupervisorSecretImportEnvCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "import-env",
-		Short: "Migrate from GC_SUPERVISOR_ENV plaintext-in-plist to the secrets backend",
+		Short: "Migrate from GC_SUPERVISOR_ENV plaintext-in-plist to the age store",
 		Long: `Reads each key listed in $GC_SUPERVISOR_ENV from the current shell
-environment, writes it to the configured backend, and prints a
-suggested [secrets.keychain] (or [secrets.file]) prefixes block to
-add to ~/.gc/supervisor.toml.`,
+environment, writes it to the age-encrypted store, and prints a
+suggested [secrets.age] keys = [...] block to add to ~/.gc/supervisor.toml.`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			cfg, err := loadSupervisorConfigForSecrets()
 			if err != nil {
 				return err
 			}
-			ring, err := openSecretRing(cfg)
+			store, err := openSecretStore(cfg)
 			if err != nil {
 				return err
 			}
@@ -202,31 +196,19 @@ add to ~/.gc/supervisor.toml.`,
 					fmt.Fprintf(stderr, "skipping %s: empty in current env\n", k)
 					continue
 				}
-				if err := ring.Set(keyring.Item{Key: k, Data: []byte(v)}); err != nil {
+				if err := store.Set(k, []byte(v)); err != nil {
 					fmt.Fprintf(stderr, "set %s: %v\n", k, err)
 					continue
 				}
 				imported = append(imported, k)
 			}
 			sort.Strings(imported)
-			fmt.Fprintf(stdout, "Imported %d secrets to backend %q.\n\n", len(imported), backendOrAuto(cfg.Secrets.Backend))
+			fmt.Fprintf(stdout, "Imported %d secrets to the age store.\n\n", len(imported))
 			fmt.Fprintln(stdout, "Add the following to ~/.gc/supervisor.toml:")
-			sectionName := "[secrets.keychain]"
-			if cfg.Secrets.Backend == "file" {
-				sectionName = "[secrets.file]"
-			}
-			fmt.Fprintf(stdout, "\n%s\nprefixes = [%s]\n", sectionName, quotedList(imported))
+			fmt.Fprintf(stdout, "\n[secrets.age]\nkeys = [%s]\n", quotedList(imported))
 			return nil
 		},
 	}
-}
-
-// backendOrAuto returns b if non-empty, otherwise "auto".
-func backendOrAuto(b string) string {
-	if b == "" {
-		return "auto"
-	}
-	return b
 }
 
 // quotedList formats items as a comma-separated list of Go-quoted strings
@@ -252,10 +234,10 @@ func loadSupervisorConfigForSecrets() (supervisor.Config, error) {
 	return cfg, nil
 }
 
-// openSecretRing opens the keyring described by cfg.Secrets using
-// the same wrapper the supervisor uses at startup.
-func openSecretRing(cfg supervisor.Config) (keyring.Keyring, error) {
-	return secrets.OpenKeyring(cfg.Secrets, secretPromptFn)
+// openSecretStore opens the age-encrypted store described by
+// cfg.Secrets.Age. Same constructor the supervisor uses at startup.
+func openSecretStore(cfg supervisor.Config) (*secrets.Store, error) {
+	return secrets.Open(cfg.Secrets.Age)
 }
 
 // readSecretValue reads the secret value either from stdin (when
@@ -287,18 +269,13 @@ func confirm(stdin io.Reader, stdout io.Writer, prompt string) bool {
 	return strings.EqualFold(strings.TrimSpace(resp), "y")
 }
 
-// isNotFoundErr reports whether err indicates the keyring item was not
-// found. The 99designs/keyring library uses ErrKeyNotFound for Get, but
-// the file backend's Remove delegates to os.Remove, which returns an OS
-// path error. Both cases are treated as "already gone."
+// isNotFoundErr reports whether err indicates the secret was not
+// found in the age store.
 func isNotFoundErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, keyring.ErrKeyNotFound) {
-		return true
-	}
-	return os.IsNotExist(err)
+	return errors.Is(err, secrets.ErrNotFound)
 }
 
 // secretRow holds one row of "gc supervisor secret list" output.
@@ -311,13 +288,13 @@ type secretRow struct {
 }
 
 // newSupervisorSecretListCmd returns the "secret list" subcommand that
-// reconciles configured prefixes against keyring contents, reporting
+// reconciles configured keys against the age store contents, reporting
 // OK, MISSING, ORPHAN, STALE, and MISMATCH rows.
 func newSupervisorSecretListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List configured secrets, keyring contents, and live supervisor state",
+		Short: "List configured secrets, age store contents, and live supervisor state",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			cfg, err := loadSupervisorConfigForSecrets()
@@ -338,93 +315,82 @@ func newSupervisorSecretListCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
-// buildSecretRows reconciles configured prefixes against keyring contents,
-// then enriches each row with live supervisor state from the
+// buildSecretRows reconciles the configured key list against age store
+// contents, then enriches each row with live supervisor state from the
 // /v1/supervisor/secrets/status endpoint. Rows are sorted by name.
-// Status values: OK (configured + in keyring + supervisor agrees),
-// MISMATCH (configured + in keyring + supervisor hash differs),
-// STALE (configured + in keyring + supervisor does not report it),
-// MISSING (configured but absent from keyring),
-// ORPHAN (in keyring but not matched by any configured prefix).
+// Status values: OK (configured + in store + supervisor agrees),
+// MISMATCH (configured + in store + supervisor hash differs),
+// STALE (configured + in store + supervisor does not report it),
+// MISSING (configured but absent from store),
+// ORPHAN (in store but not in the configured key list).
 // When the supervisor is unreachable, LiveStatus is "(supervisor down)"
-// and configured+keyring secrets retain "OK" status.
+// and configured+in-store secrets retain "OK" status.
 func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
-	ring, err := openSecretRing(cfg)
+	store, err := openSecretStore(cfg)
 	if err != nil {
 		return nil, err
 	}
-	keys, err := ring.Keys()
+	storedKeys, err := store.Keys()
 	if err != nil {
 		return nil, err
 	}
-	inKeyring := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		inKeyring[k] = true
+	inStore := make(map[string]bool, len(storedKeys))
+	for _, k := range storedKeys {
+		inStore[k] = true
 	}
 
 	liveByName, liveErr := fetchLiveSupervisorSecrets(cfg.Supervisor.PortOrDefault())
 
-	prefixes := append([]string{}, cfg.Secrets.Keychain.Prefixes...)
-	if cfg.Secrets.Backend == "file" {
-		prefixes = cfg.Secrets.File.Prefixes
-	}
-
-	matched := make(map[string]bool)
+	configured := make(map[string]bool, len(cfg.Secrets.Age.Keys))
 	var rows []secretRow
-	for _, prefix := range prefixes {
-		prefixMatched := false
-		for _, k := range keys {
-			if strings.HasPrefix(k, prefix) {
-				matched[k] = true
-				prefixMatched = true
-
-				liveStatus := "(supervisor down)"
-				status := "OK"
-				if liveErr == nil {
-					if live, ok := liveByName[k]; ok {
-						liveStatus = "yes"
-						item, _ := ring.Get(k)
-						localSum := sha256.Sum256(item.Data)
-						localHash := hex.EncodeToString(localSum[:])
-						if live.SHA256 != localHash {
-							status = "MISMATCH"
-						}
-					} else {
-						liveStatus = "no"
-						status = "STALE"
-					}
-				}
-
-				rows = append(rows, secretRow{
-					Name:       k,
-					Configured: true,
-					InKeyring:  true,
-					LiveStatus: liveStatus,
-					Status:     status,
-				})
-			}
-		}
-		if !prefixMatched {
+	for _, key := range cfg.Secrets.Age.Keys {
+		configured[key] = true
+		if !inStore[key] {
 			rows = append(rows, secretRow{
-				Name:       prefix,
+				Name:       key,
 				Configured: true,
 				InKeyring:  false,
 				LiveStatus: "no",
 				Status:     "MISSING",
 			})
+			continue
 		}
+		liveStatus := "(supervisor down)"
+		status := "OK"
+		if liveErr == nil {
+			if live, ok := liveByName[key]; ok {
+				liveStatus = "yes"
+				data, _ := store.Get(key)
+				localSum := sha256.Sum256(data)
+				localHash := hex.EncodeToString(localSum[:])
+				if live.SHA256 != localHash {
+					status = "MISMATCH"
+				}
+			} else {
+				liveStatus = "no"
+				status = "STALE"
+			}
+		}
+		rows = append(rows, secretRow{
+			Name:       key,
+			Configured: true,
+			InKeyring:  true,
+			LiveStatus: liveStatus,
+			Status:     status,
+		})
 	}
-	// Orphans: in keyring but not matched by any configured prefix.
-	for _, k := range keys {
-		if !matched[k] {
-			rows = append(rows, secretRow{
-				Name:       k,
-				Configured: false,
-				InKeyring:  true,
-				LiveStatus: "no",
-				Status:     "ORPHAN",
-			})
+	// Orphans: in the store but not in the configured key list.
+	for _, k := range storedKeys {
+		if configured[k] {
+			continue
 		}
+		rows = append(rows, secretRow{
+			Name:       k,
+			Configured: false,
+			InKeyring:  true,
+			LiveStatus: "no",
+			Status:     "ORPHAN",
+		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	return rows, nil
@@ -470,7 +436,7 @@ func fetchLiveSupervisorSecrets(port int) (map[string]liveSecret, error) {
 
 // printSecretRowsTable writes rows as a fixed-width table to out.
 func printSecretRowsTable(out io.Writer, rows []secretRow) error {
-	fmt.Fprintf(out, "%-24s %-11s %-12s %-22s %s\n", "NAME", "CONFIGURED", "IN-KEYRING", "LIVE-IN-SUPERVISOR", "STATUS")
+	fmt.Fprintf(out, "%-24s %-11s %-12s %-22s %s\n", "NAME", "CONFIGURED", "IN-STORE", "LIVE-IN-SUPERVISOR", "STATUS")
 	for _, r := range rows {
 		fmt.Fprintf(out, "%-24s %-11s %-12s %-22s %s\n",
 			r.Name, yesno(r.Configured), yesno(r.InKeyring), r.LiveStatus, r.Status)
