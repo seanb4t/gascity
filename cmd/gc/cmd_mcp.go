@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
@@ -46,6 +47,7 @@ func newMcpListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long:  "Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			loadStartupSecrets(context.Background(), stderr)
 			agentName = strings.TrimSpace(agentName)
 			sessionID = strings.TrimSpace(sessionID)
 			switch {
