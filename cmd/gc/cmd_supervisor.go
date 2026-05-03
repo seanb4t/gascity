@@ -792,6 +792,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, startedAt)
+	apiMux.SetSecretsView(api.SecretsLoaderView(secretsLoader))
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {

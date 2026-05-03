@@ -5452,6 +5452,30 @@
         "additionalProperties": false,
         "type": "object"
       },
+      "SecretStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "length": {
+            "description": "byte length of the value",
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "description": "env var name",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "hex-encoded SHA-256 of the value (for drift comparison)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "length",
+          "sha256"
+        ],
+        "type": "object"
+      },
       "ServiceRestartOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6548,6 +6572,24 @@
           "uptime_sec",
           "cities_total",
           "cities_running"
+        ],
+        "type": "object"
+      },
+      "SupervisorSecretsStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/SecretStatus"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "secrets"
         ],
         "type": "object"
       },
@@ -22989,6 +23031,44 @@
           }
         },
         "summary": "Get v0 readiness"
+      }
+    },
+    "/v1/supervisor/secrets/status": {
+      "get": {
+        "operationId": "supervisor-secrets-status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupervisorSecretsStatusResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "List loaded supervisor secrets (names and hashes only)"
       }
     }
   }

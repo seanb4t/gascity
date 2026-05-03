@@ -1906,6 +1906,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/supervisor/secrets/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List loaded supervisor secrets (names and hashes only) */
+        get: operations["supervisor-secrets-status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3573,6 +3590,17 @@ export interface components {
             suspended?: boolean;
         };
         ScopeGroup: Record<string, never>;
+        SecretStatus: {
+            /**
+             * Format: int64
+             * @description byte length of the value
+             */
+            length: number;
+            /** @description env var name */
+            name: string;
+            /** @description hex-encoded SHA-256 of the value (for drift comparison) */
+            sha256: string;
+        };
         ServiceRestartOutputBody: {
             /**
              * @description Action performed.
@@ -3995,6 +4023,9 @@ export interface components {
             uptime_sec: number;
             /** @description Supervisor version. */
             version: string;
+        };
+        SupervisorSecretsStatusResponse: {
+            secrets: components["schemas"]["SecretStatus"][] | null;
         };
         SupervisorStartup: {
             /** @description Current phase (when not ready). */
@@ -11647,6 +11678,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReadinessResponse"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "supervisor-secrets-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SupervisorSecretsStatusResponse"];
                 };
             };
             /** @description Error */

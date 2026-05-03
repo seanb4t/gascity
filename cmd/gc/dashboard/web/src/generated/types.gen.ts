@@ -2226,6 +2226,21 @@ export type ScopeGroup = {
     [key: string]: never;
 };
 
+export type SecretStatus = {
+    /**
+     * byte length of the value
+     */
+    length: number;
+    /**
+     * env var name
+     */
+    name: string;
+    /**
+     * hex-encoded SHA-256 of the value (for drift comparison)
+     */
+    sha256: string;
+};
+
 export type ServiceRestartOutputBody = {
     /**
      * Action performed.
@@ -2769,6 +2784,10 @@ export type SupervisorHealthOutputBody = {
      * Supervisor version.
      */
     version: string;
+};
+
+export type SupervisorSecretsStatusResponse = {
+    secrets: Array<SecretStatus> | null;
 };
 
 export type SupervisorStartup = {
@@ -10224,3 +10243,28 @@ export type GetV0ReadinessResponses = {
 };
 
 export type GetV0ReadinessResponse = GetV0ReadinessResponses[keyof GetV0ReadinessResponses];
+
+export type SupervisorSecretsStatusData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/supervisor/secrets/status';
+};
+
+export type SupervisorSecretsStatusErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type SupervisorSecretsStatusError = SupervisorSecretsStatusErrors[keyof SupervisorSecretsStatusErrors];
+
+export type SupervisorSecretsStatusResponses = {
+    /**
+     * OK
+     */
+    200: SupervisorSecretsStatusResponse;
+};
+
+export type SupervisorSecretsStatusResponse2 = SupervisorSecretsStatusResponses[keyof SupervisorSecretsStatusResponses];

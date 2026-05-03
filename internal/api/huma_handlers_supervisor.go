@@ -202,6 +202,15 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 	huma.Get(sm.humaAPI, "/health", sm.humaHandleHealth)
 	huma.Get(sm.humaAPI, "/v0/readiness", sm.humaHandleReadiness)
 	huma.Get(sm.humaAPI, "/v0/provider-readiness", sm.humaHandleProviderReadiness)
+	// Secrets status: registered with a dynamic closure over sm so that
+	// SetSecretsView can be called after NewSupervisorMux returns without
+	// any race — the closure reads sm.secretsView at request time.
+	RegisterSupervisorSecretsStatus(sm.humaAPI, func() []string {
+		if sm.secretsView == nil {
+			return nil
+		}
+		return sm.secretsView()
+	})
 	// Async mutation: returns 202 Accepted after scaffold + register;
 	// completion is signaled via request.result.city.create or request.failed.
 	huma.Post(sm.humaAPI, "/v0/city", sm.humaHandleCityCreate, addMutationCSRFParam, func(op *huma.Operation) {
