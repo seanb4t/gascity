@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/99designs/keyring"
 )
 
 // useFixedSecretPrompt replaces secretPromptFn with a deterministic
@@ -97,5 +99,56 @@ prefixes = ["EXA_API_KEY"]
 	cmd.SetArgs([]string{"EXA_API_KEY", "--force"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("delete non-existent: %v", err)
+	}
+}
+
+func TestSecretList_DriftDetection(t *testing.T) {
+	dir := t.TempDir()
+	writeTestSupervisorTOML(t, `
+[secrets]
+backend = "file"
+[secrets.file]
+dir = "`+dir+`"
+prefixes = ["EXA_API_KEY", "FIRECRAWL_KEY", "LINEAR_TOKEN"]
+`)
+	useFixedSecretPrompt(t)
+
+	promptFn := func(_ string) (string, error) { return "test-password", nil }
+	ring, err := keyring.Open(keyring.Config{
+		ServiceName:      "gc-supervisor",
+		AllowedBackends:  []keyring.BackendType{keyring.FileBackend},
+		FileDir:          dir,
+		FilePasswordFunc: promptFn,
+	})
+	if err != nil {
+		t.Fatalf("open ring: %v", err)
+	}
+	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("v")}); err != nil {
+		t.Fatalf("set EXA_API_KEY: %v", err)
+	}
+	if err := ring.Set(keyring.Item{Key: "LINEAR_TOKEN", Data: []byte("v")}); err != nil {
+		t.Fatalf("set LINEAR_TOKEN: %v", err)
+	}
+	if err := ring.Set(keyring.Item{Key: "ORPHAN_KEY", Data: []byte("v")}); err != nil {
+		t.Fatalf("set ORPHAN_KEY: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newSupervisorSecretListCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"EXA_API_KEY", "OK",
+		"FIRECRAWL_KEY", "MISSING",
+		"LINEAR_TOKEN", "OK",
+		"ORPHAN_KEY", "ORPHAN",
+		"(supervisor down)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output missing %q\nfull output:\n%s", want, out)
+		}
 	}
 }
