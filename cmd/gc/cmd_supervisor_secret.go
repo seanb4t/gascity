@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -337,10 +340,16 @@ func newSupervisorSecretListCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
-// buildSecretRows reconciles configured prefixes against keyring contents.
-// Rows are sorted by name. Status values: OK (in keyring and configured),
-// MISSING (configured but absent from keyring), ORPHAN (in keyring but
-// not matched by any configured prefix).
+// buildSecretRows reconciles configured prefixes against keyring contents,
+// then enriches each row with live supervisor state from the
+// /v1/supervisor/secrets/status endpoint. Rows are sorted by name.
+// Status values: OK (configured + in keyring + supervisor agrees),
+// MISMATCH (configured + in keyring + supervisor hash differs),
+// STALE (configured + in keyring + supervisor does not report it),
+// MISSING (configured but absent from keyring),
+// ORPHAN (in keyring but not matched by any configured prefix).
+// When the supervisor is unreachable, LiveStatus is "(supervisor down)"
+// and configured+keyring secrets retain "OK" status.
 func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
 	ring, err := openSecretRing(cfg)
 	if err != nil {
@@ -350,13 +359,19 @@ func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	inKeyring := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		inKeyring[k] = true
+	}
+
+	liveByName, liveErr := fetchLiveSupervisorSecrets()
 
 	prefixes := append([]string{}, cfg.Secrets.Keychain.Prefixes...)
 	if cfg.Secrets.Backend == "file" {
 		prefixes = cfg.Secrets.File.Prefixes
 	}
 
-	matched := make(map[string]bool, len(keys))
+	matched := make(map[string]bool)
 	var rows []secretRow
 	for _, prefix := range prefixes {
 		prefixMatched := false
@@ -364,12 +379,30 @@ func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
 			if strings.HasPrefix(k, prefix) {
 				matched[k] = true
 				prefixMatched = true
+
+				liveStatus := "(supervisor down)"
+				status := "OK"
+				if liveErr == nil {
+					if live, ok := liveByName[k]; ok {
+						liveStatus = "yes"
+						item, _ := ring.Get(k)
+						localSum := sha256.Sum256(item.Data)
+						localHash := hex.EncodeToString(localSum[:])
+						if live.SHA256 != localHash {
+							status = "MISMATCH"
+						}
+					} else {
+						liveStatus = "no"
+						status = "STALE"
+					}
+				}
+
 				rows = append(rows, secretRow{
 					Name:       k,
 					Configured: true,
 					InKeyring:  true,
-					LiveStatus: "(supervisor down)",
-					Status:     "OK",
+					LiveStatus: liveStatus,
+					Status:     status,
 				})
 			}
 		}
@@ -397,6 +430,43 @@ func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	return rows, nil
+}
+
+// liveSecret is the per-secret payload returned by
+// GET /v1/supervisor/secrets/status.
+type liveSecret struct {
+	Name   string `json:"name"`
+	Length int    `json:"length"`
+	SHA256 string `json:"sha256"`
+}
+
+// fetchLiveSupervisorSecrets queries the running supervisor's
+// /v1/supervisor/secrets/status endpoint and returns a map of secret name
+// to liveSecret. The base URL is taken from GC_SUPERVISOR_API_URL when
+// set (used in tests), falling back to the supervisor's default port 8372.
+// Any network or decode error is returned as-is; callers treat a non-nil
+// error as "supervisor down" and fall back to placeholder status.
+func fetchLiveSupervisorSecrets() (map[string]liveSecret, error) {
+	base := os.Getenv("GC_SUPERVISOR_API_URL")
+	if base == "" {
+		base = fmt.Sprintf("http://127.0.0.1:%d", supervisor.Section{}.PortOrDefault())
+	}
+	resp, err := http.Get(base + "/v1/supervisor/secrets/status") //nolint:noctx
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Secrets []liveSecret `json:"secrets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	out := make(map[string]liveSecret, len(body.Secrets))
+	for _, s := range body.Secrets {
+		out[s.Name] = s
+	}
+	return out, nil
 }
 
 // printSecretRowsTable writes rows as a fixed-width table to out.
