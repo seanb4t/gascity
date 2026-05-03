@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -113,6 +114,44 @@ func TestSecretReload_NoSupervisor(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not running") && !strings.Contains(err.Error(), "not running") {
 		t.Errorf("expected 'not running' message, got stderr=%q err=%v", stderr.String(), err)
+	}
+}
+
+func TestSecretImportEnv_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	writeTestSupervisorTOML(t, `
+[secrets]
+backend = "file"
+[secrets.file]
+dir = "`+dir+`"
+prefixes = []
+`)
+	useFixedSecretPrompt(t)
+	t.Setenv("GC_SUPERVISOR_ENV", "FOO_KEY,BAR_TOKEN")
+	t.Setenv("FOO_KEY", "foo-val")
+	t.Setenv("BAR_TOKEN", "bar-val")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newSupervisorSecretImportEnvCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	promptFn := func(_ string) (string, error) { return "test-password", nil }
+	ring, _ := keyring.Open(keyring.Config{
+		ServiceName: "gc-supervisor", AllowedBackends: []keyring.BackendType{keyring.FileBackend},
+		FileDir: dir, FilePasswordFunc: promptFn,
+	})
+	keys, _ := ring.Keys()
+	sort.Strings(keys)
+	want := []string{"BAR_TOKEN", "FOO_KEY"}
+	if strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Errorf("keyring contents = %v, want %v", keys, want)
+	}
+
+	if !strings.Contains(stdout.String(), "[secrets.file]") || !strings.Contains(stdout.String(), "FOO_KEY") {
+		t.Errorf("suggested TOML missing from stdout:\n%s", stdout.String())
 	}
 }
 
