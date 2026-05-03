@@ -252,8 +252,10 @@ resolution chain — most explicit user intent wins:
    (so users can `echo "pass" >> file` without surprises). Empty content →
    skip this step, fall through to step 3.
 3. **macOS Keychain bootstrap (darwin only).** Subprocess call wrapped in a
-   `context.WithTimeout(ctx, 5*time.Second)` so a locked-keychain GUI prompt
-   on a headless / launchd-managed supervisor cannot hang startup forever:
+   `context.WithTimeout(ctx, 30*time.Second)` so a locked-keychain GUI prompt
+   on a headless / launchd-managed supervisor cannot hang startup forever
+   (originally 5s; bumped to 30s after smoke testing showed users were
+   missing interactive Keychain ACL prompts before the deadline fired):
    ```
    security find-generic-password -s gc-supervisor-passphrase -a $account -w
    ```
@@ -262,7 +264,7 @@ resolution chain — most explicit user intent wins:
    - **Exit 0, empty stdout** → log ERROR (`Keychain bootstrap returned empty passphrase; the gc-supervisor-passphrase item is mis-set. Re-seed with: security add-generic-password -U -s gc-supervisor-passphrase -a $account -w`) and fall through to step 4. Empty-string passphrase is **never** accepted from this path — the same flag combination that produced an empty item could just as easily produce an attacker-controlled empty store.
    - **Exit 44** → "not found", fall through to step 4 silently.
    - **Other non-zero** → log WARN with stderr, fall through to step 4.
-   - **Context deadline exceeded** → log WARN (`Keychain lookup timed out after 5s; is the login keychain locked?`), fall through to step 4.
+   - **Context deadline exceeded** → log WARN (`Keychain lookup timed out after 30s; is the login keychain locked?`), fall through to step 4.
 
    **gc never writes to this Keychain item.** The user seeds it once, manually
    (see migration section). The `-T ""` argument when seeding sets an empty

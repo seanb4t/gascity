@@ -157,7 +157,14 @@ const keychainServiceName = "gc-supervisor-passphrase"
 // keychainTimeoutVar is the deadline for the security subprocess.
 // Declared as a var (not const) so overrideKeychainTimeoutForTest can
 // swap it for fast tests.
-var keychainTimeoutVar = 5 * time.Second
+//
+// 30s ceiling: long enough that an interactive user can answer a
+// Keychain ACL prompt that takes a few seconds to surface (Touch ID,
+// "Always Allow" dialog, etc.), short enough that a launchd-managed
+// supervisor with a locked keychain doesn't hang startup forever.
+// The original 5s ceiling was too aggressive for the daily-driver
+// CLI path — users were missing the prompt before the deadline fired.
+var keychainTimeoutVar = 30 * time.Second
 
 // overrideKeychainTimeoutForTest swaps the production timeout. Returns
 // a restore func suitable for t.Cleanup.
@@ -168,7 +175,7 @@ func overrideKeychainTimeoutForTest(d time.Duration) func() {
 }
 
 // keychainBootstrap runs `security find-generic-password -s gc-supervisor-passphrase -a $account -w`
-// with a 5s timeout. Returns the passphrase + true if found, false +
+// with a 30s timeout. Returns the passphrase + true if found, false +
 // error if not (caller falls through). Empty stdout is treated as
 // ERROR-and-fall-through to prevent a mis-set Keychain item from
 // silently producing an empty-passphrase store.
