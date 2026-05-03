@@ -2,6 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +15,12 @@ import (
 
 	"github.com/99designs/keyring"
 )
+
+// hexsha returns the hex-encoded SHA-256 digest of s.
+func hexsha(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
 
 // useFixedSecretPrompt replaces secretPromptFn with a deterministic
 // password function so the file backend does not prompt interactively.
@@ -152,6 +163,50 @@ prefixes = []
 
 	if !strings.Contains(stdout.String(), "[secrets.file]") || !strings.Contains(stdout.String(), "FOO_KEY") {
 		t.Errorf("suggested TOML missing from stdout:\n%s", stdout.String())
+	}
+}
+
+func TestSecretList_LiveSupervisorDimension(t *testing.T) {
+	secrets := []map[string]any{
+		{"name": "EXA_API_KEY", "length": 11, "sha256": hexsha("hello-world")},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/supervisor/secrets/status" {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"secrets": secrets})
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	writeTestSupervisorTOML(t, `
+[supervisor]
+port = 0
+[secrets]
+backend = "file"
+[secrets.file]
+dir = "`+dir+`"
+prefixes = ["EXA_API_KEY"]
+`)
+	useFixedSecretPrompt(t)
+	promptFn := func(_ string) (string, error) { return "test-password", nil }
+	ring, _ := keyring.Open(keyring.Config{
+		ServiceName: "gc-supervisor", AllowedBackends: []keyring.BackendType{keyring.FileBackend},
+		FileDir: dir, FilePasswordFunc: promptFn,
+	})
+	ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("hello-world")})
+
+	t.Setenv("GC_SUPERVISOR_API_URL", srv.URL)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newSupervisorSecretListCmd(&stdout, &stderr)
+	cmd.Execute()
+	if !strings.Contains(stdout.String(), "OK") {
+		t.Errorf("want OK status; got:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "(supervisor down)") {
+		t.Errorf("want live status, got placeholder:\n%s", stdout.String())
 	}
 }
 
