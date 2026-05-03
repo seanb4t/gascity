@@ -700,9 +700,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if secErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: secrets load failed: %v (continuing without loaded secrets)\n", secErr) //nolint:errcheck
 	} else {
-		if len(secResult.Set) > 0 {
-			fmt.Fprintf(stderr, "gc supervisor: loaded %d secrets: %s\n", len(secResult.Set), strings.Join(secResult.Set, ", ")) //nolint:errcheck
-		}
+		// Successful loads are silent — keep supervisor.log focused on
+		// actionable signals. Names of loaded secrets are queryable via
+		// `gc supervisor secret list` and the /v1/supervisor/secrets/status
+		// endpoint when needed.
 		for _, p := range secResult.Missing {
 			fmt.Fprintf(stderr, "gc supervisor: WARN: secrets prefix %q matched zero items in keyring\n", p) //nolint:errcheck
 		}
