@@ -134,6 +134,7 @@ func (s *Store) writeStamp() error {
 	if err != nil {
 		return fmt.Errorf("open stamp tmp: %w", err)
 	}
+	defer os.Remove(tmp) // no-op if rename succeeded
 	w, err := age.Encrypt(f, rec)
 	if err != nil {
 		_ = f.Close()
