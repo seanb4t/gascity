@@ -189,8 +189,7 @@ var (
 	supervisorReloadWaitTimeout  = 5 * time.Minute
 )
 
-// secretsLoader is package-level so the SIGHUP handler (installed in runSupervisor) can
-// access it to call Reload. Initialized in runSupervisor.
+// secretsLoader is package-level so the SIGHUP handler can call Reload. Initialized in runSupervisor.
 var secretsLoader *secrets.Loader
 
 // shutdownState tracks the supervisor's shutdown progress so socket
@@ -700,10 +699,6 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if secErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: secrets load failed: %v (continuing without loaded secrets)\n", secErr) //nolint:errcheck
 	} else {
-		// Successful loads are silent — keep supervisor.log focused on
-		// actionable signals. Names of loaded secrets are queryable via
-		// `gc supervisor secret list` and the /v1/supervisor/secrets/status
-		// endpoint when needed.
 		for _, p := range secResult.Missing {
 			fmt.Fprintf(stderr, "gc supervisor: WARN: secrets prefix %q matched zero items in keyring\n", p) //nolint:errcheck
 		}
@@ -715,21 +710,16 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		}
 	}
 
-	// supCfgMu protects supCfg from concurrent SIGHUP-handler writes vs.
-	// reconcile-loop reads. The mutex is function-local; the goroutine below
-	// captures it via closure.
-	var supCfgMu sync.RWMutex
+	var supCfgMu sync.RWMutex // protects supCfg between SIGHUP-handler writes and reconcile-loop reads
 
-	// SIGHUP triggers config + secrets reload. Children spawned before
-	// the HUP retain their env (Unix process env is immutable post-spawn);
-	// future spawns inherit the new values.
+	// SIGHUP reloads config and secrets. Children spawned before the HUP retain their env
+	// (Unix process env is immutable post-spawn); future spawns inherit the new values.
 	configPath := supervisor.ConfigPath()
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)
 	go func() {
 		for range hupCh {
 			fmt.Fprintf(stderr, "supervisor: SIGHUP received; reloading config and secrets\n") //nolint:errcheck
-			// Re-read config from the same path runSupervisor used.
 			newCfg, err := supervisor.LoadConfig(configPath)
 			if err != nil {
 				fmt.Fprintf(stderr, "supervisor: SIGHUP: config reload failed: %v (keeping previous config)\n", err) //nolint:errcheck
@@ -756,8 +746,6 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			}
 			fmt.Fprintf(stderr, "supervisor: SIGHUP: reloaded — added=%v updated=%v removed=%v\n",
 				rr.Added, rr.Updated, rr.Removed) //nolint:errcheck
-			// Replace cfg in scope so subsequent reloads diff against the
-			// most recent values.
 			supCfgMu.Lock()
 			supCfg = newCfg
 			supCfgMu.Unlock()

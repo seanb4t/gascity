@@ -67,10 +67,8 @@ func MCPTemplateData(
 	for key, value := range agent.Env {
 		data[key] = value
 	}
-	// Bridge documented allow_env_override → MCP template context: keys
-	// listed there get their values pulled from os.Environ() if not already
-	// set via per-agent env. Implements the city.toml-comment's intent
-	// (previously parsed-but-ignored at runtime per AgentDefaults docs).
+	// Honor allow_env_override: pull matching keys from os.Environ() into the template context
+	// if not already set by per-agent env (keychain-loaded secrets arrive via os.Environ).
 	if cfg != nil {
 		for _, key := range cfg.AgentDefaults.AllowEnvOverride {
 			if _, exists := data[key]; exists {

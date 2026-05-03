@@ -37,12 +37,7 @@ health. Use --fix to attempt automatic repairs.`,
   gc doctor --verbose`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Doctor's mcp-config check runs MCP template expansion via
-			// MCPTemplateData, which consults os.Environ() for keys listed in
-			// agent_defaults.allow_env_override. Load supervisor secrets so
-			// keychain-stored values reach the template context (same wiring
-			// as gc start and gc mcp list). Non-fatal: missing supervisor.toml
-			// or backend errors are ignored.
+			// mcp-config check runs MCP template expansion — load secrets so keychain values reach the template context.
 			loadStartupSecrets(cmd.Context(), stderr)
 			if doDoctor(fix, verbose, stdout, stderr) != 0 {
 				return errExit

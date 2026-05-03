@@ -30,7 +30,6 @@ func TestRunSupervisor_LoadsSecretsBeforeAPIBind(t *testing.T) {
 	}
 	promptFn := func(_ string) (string, error) { return "test-pw", nil }
 
-	// Seed the file backend.
 	ring, err := keyring.Open(keyring.Config{
 		ServiceName:      "gc-supervisor",
 		AllowedBackends:  []keyring.BackendType{keyring.FileBackend},
@@ -75,7 +74,6 @@ func TestSecretsReload_RoundTrip(t *testing.T) {
 	promptFn := func(_ string) (string, error) { return "pw", nil }
 	loader := secrets.NewLoader(promptFn)
 
-	// Seed v1.
 	ring, err := keyring.Open(keyring.Config{
 		ServiceName:      "gc-supervisor",
 		AllowedBackends:  []keyring.BackendType{keyring.FileBackend},
@@ -95,7 +93,6 @@ func TestSecretsReload_RoundTrip(t *testing.T) {
 		t.Fatal("setup")
 	}
 
-	// Mutate and reload.
 	if err := ring.Set(keyring.Item{Key: "EXA_API_KEY", Data: []byte("v2")}); err != nil {
 		t.Fatal(err)
 	}
