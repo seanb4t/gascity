@@ -254,6 +254,10 @@ Lesson test — it becomes LESS useful as models improve.
   into `applyRigPatch` so layered configs (fragments, patches) can
   override it. No field-sync test exists for Rig today; the patch path
   must be checked manually.
+- Secret loading lives in `internal/supervisor/secrets/`. Never read
+  third-party-API-key env vars from `os.Environ()` for new features —
+  declare via `[secrets.keychain]` in supervisor.toml and let
+  `secrets.Loader` populate the env at startup.
 
 - `TESTING.md` — testing philosophy, tier boundaries, and sharded local
   runners. Read before writing any test. For broad local sweeps, prefer the
