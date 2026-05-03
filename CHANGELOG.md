@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `gc supervisor secret {set,get,list,delete,reload,import-env}` subcommand tree for managing third-party API keys (EXA, Firecrawl, etc.) via OS keychain (macOS Keychain / Linux Secret Service / Windows Credential Manager / encrypted file backend).
+- `[secrets]` section in `~/.gc/supervisor.toml` for config-driven secret loading.
+- `GET /v1/supervisor/secrets/status` HTTP API endpoint returning loaded secret names and SHA-256 hashes (never values) for drift detection.
+- `gc supervisor secret list` drift detection (OK / MISSING / STALE / MISMATCH / ORPHAN status).
+
 ### Changed
 
+- Release pipeline switched from `goreleaser-action` (CGO_ENABLED=0) to `goreleaser-cross` Docker image (CGo cross-compile) to support the new keyring backends. This affects release-build infrastructure only; `make test` and local development are unchanged.
 - Managed Dolt config now emits listener backlog and connection-timeout keys.
   Existing managed cities may see a `dolt-config` doctor warning until
   `gc dolt restart` or the next managed server start regenerates

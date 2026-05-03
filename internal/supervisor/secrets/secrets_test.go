@@ -202,6 +202,26 @@ func TestReload_Idempotent(t *testing.T) {
 	}
 }
 
+func TestNames(t *testing.T) {
+	scrubEnv(t, "EXA_API_KEY", "LINEAR_TOKEN")
+	cfg := seedFileKeyring(t, []string{"EXA_API_KEY", "LINEAR_TOKEN"}, map[string]string{
+		"EXA_API_KEY":  "v",
+		"LINEAR_TOKEN": "v",
+	})
+	loader := NewLoader(fixedFilePrompt())
+	if got := loader.Names(); len(got) != 0 {
+		t.Errorf("Names() before LoadAll = %v, want empty", got)
+	}
+	if _, err := loader.LoadAll(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	got := loader.Names()
+	want := []string{"EXA_API_KEY", "LINEAR_TOKEN"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("Names() after LoadAll = %v, want %v", got, want)
+	}
+}
+
 func contains(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
