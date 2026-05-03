@@ -1,10 +1,14 @@
 package secrets
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
+	"time"
 )
 
 // EnvPassphraseVar is the env var consulted first by the resolution
@@ -47,6 +51,7 @@ type passphraseSources struct {
 	KeyfilePath     string
 	KeychainAccount string // empty disables Keychain bootstrap
 	NoTTY           bool   // tests force this true to avoid stdin reads
+	LogFn           func(format string, args ...interface{})
 }
 
 // resolvePassphrase walks the env → keyfile → Keychain → TTY chain.
@@ -68,7 +73,12 @@ func resolvePassphrase(sources passphraseSources) (string, PassphraseSource, err
 			return v, PassphraseSourceKeyfile, nil
 		}
 	}
-	// Keychain bootstrap and TTY prompt land in Tasks 8 and 9.
+	if v, ok, err := keychainBootstrap(sources.KeychainAccount, sources.logger()); err != nil {
+		return "", PassphraseSourceUnset, err
+	} else if ok {
+		return v, PassphraseSourceKeychain, nil
+	}
+	// TTY prompt step lands in Task 9.
 	return "", PassphraseSourceUnset, errPassphraseNoSources(sources.KeyfilePath)
 }
 
@@ -107,4 +117,105 @@ func errPassphraseNoSources(keyfilePath string) error {
 			"gc-supervisor-passphrase Keychain item, or run interactively",
 		EnvPassphraseVar, keyfilePath,
 	)
+}
+
+// cmdRunner abstracts os/exec for tests. Production sets the package
+// variable to a real implementation; tests override.
+type cmdRunner interface {
+	Run(ctx context.Context, name string, args ...string) (stdout []byte, exitCode int, err error)
+}
+
+// detectGOOS is a package var so tests can pin it.
+var detectGOOS = func() string { return runtime.GOOS }
+
+// keychainCmdRunner is the production runner — wraps exec.CommandContext.
+// Tests assign a fake to this var.
+var keychainCmdRunner cmdRunner = realCmdRunner{}
+
+type realCmdRunner struct{}
+
+func (realCmdRunner) Run(ctx context.Context, name string, args ...string) ([]byte, int, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.Output()
+	if err == nil {
+		return out, 0, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return out, exitErr.ExitCode(), nil
+	}
+	return out, -1, err
+}
+
+// keychainServiceName is the service-name for the passphrase-bootstrap
+// Keychain item. Constant; users seed it once via `security add-generic-password`.
+const keychainServiceName = "gc-supervisor-passphrase"
+
+// keychainTimeoutVar is the deadline for the security subprocess.
+// Declared as a var (not const) so overrideKeychainTimeoutForTest can
+// swap it for fast tests.
+var keychainTimeoutVar = 5 * time.Second
+
+// overrideKeychainTimeoutForTest swaps the production timeout. Returns
+// a restore func suitable for t.Cleanup.
+func overrideKeychainTimeoutForTest(d time.Duration) func() {
+	prev := keychainTimeoutVar
+	keychainTimeoutVar = d
+	return func() { keychainTimeoutVar = prev }
+}
+
+// keychainBootstrap runs `security find-generic-password -s gc-supervisor-passphrase -a $account -w`
+// with a 5s timeout. Returns the passphrase + true if found, false +
+// error if not (caller falls through). Empty stdout is treated as
+// ERROR-and-fall-through to prevent a mis-set Keychain item from
+// silently producing an empty-passphrase store.
+func keychainBootstrap(account string, logger func(format string, args ...interface{})) (string, bool, error) {
+	if detectGOOS() != "darwin" {
+		return "", false, nil
+	}
+	if account == "" {
+		return "", false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), keychainTimeoutVar)
+	defer cancel()
+	stdout, code, err := keychainCmdRunner.Run(ctx, "security",
+		"find-generic-password", "-s", keychainServiceName, "-a", account, "-w")
+	if ctx.Err() == context.DeadlineExceeded {
+		logger("WARN: macOS Keychain lookup for gc-supervisor-passphrase timed out after %s; is the login keychain locked?", keychainTimeoutVar)
+		return "", false, nil
+	}
+	if err != nil && code == -1 {
+		// command failed to spawn (e.g. /usr/bin/security missing)
+		logger("WARN: macOS Keychain bootstrap: %v", err)
+		return "", false, nil
+	}
+	switch code {
+	case 0:
+		passphrase := strings.TrimRight(string(stdout), "\n")
+		if passphrase == "" {
+			logger(
+				"ERROR: macOS Keychain bootstrap returned empty passphrase. "+
+					"The gc-supervisor-passphrase item is mis-set. Re-seed with: "+
+					"security add-generic-password -U -s gc-supervisor-passphrase -a %q -w",
+				account,
+			)
+			return "", false, nil
+		}
+		return passphrase, true, nil
+	case 44:
+		// Item not found.
+		return "", false, nil
+	default:
+		logger("WARN: macOS Keychain bootstrap exit %d: %s", code, strings.TrimSpace(string(stdout)))
+		return "", false, nil
+	}
+}
+
+// logger returns the log function for passphraseSources, defaulting to stderr.
+func (s passphraseSources) logger() func(format string, args ...interface{}) {
+	if s.LogFn != nil {
+		return s.LogFn
+	}
+	return func(format string, args ...interface{}) {
+		fmt.Fprintf(os.Stderr, "secrets: "+format+"\n", args...)
+	}
 }

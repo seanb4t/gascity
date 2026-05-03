@@ -1,10 +1,13 @@
 package secrets
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPassphrase_EnvWins(t *testing.T) {
@@ -88,5 +91,120 @@ func TestPassphrase_KeyfileSymlinkRejected(t *testing.T) {
 	_, _, err := resolvePassphrase(passphraseSources{KeyfilePath: link})
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("symlinked keyfile must be rejected; got %v", err)
+	}
+}
+
+// fakeCmdRunner records calls and returns canned output.
+type fakeCmdRunner struct {
+	stdout []byte
+	code   int
+	err    error
+	calls  [][]string
+	delay  time.Duration
+}
+
+func (f *fakeCmdRunner) Run(ctx context.Context, name string, args ...string) ([]byte, int, error) {
+	f.calls = append(f.calls, append([]string{name}, args...))
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return nil, -1, ctx.Err()
+		}
+	}
+	return f.stdout, f.code, f.err
+}
+
+func withFakeRunner(t *testing.T, r *fakeCmdRunner) {
+	t.Helper()
+	prev := keychainCmdRunner
+	keychainCmdRunner = r
+	t.Cleanup(func() { keychainCmdRunner = prev })
+}
+
+func withGOOS(t *testing.T, goos string) {
+	t.Helper()
+	prev := detectGOOS
+	detectGOOS = func() string { return goos }
+	t.Cleanup(func() { detectGOOS = prev })
+}
+
+func TestPassphrase_KeychainBootstrap(t *testing.T) {
+	t.Setenv("GC_SECRETS_PASSPHRASE", "")
+	withGOOS(t, "darwin")
+	withFakeRunner(t, &fakeCmdRunner{stdout: []byte("from-keychain\n"), code: 0})
+	got, src, err := resolvePassphrase(passphraseSources{KeychainAccount: "user@personal"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != "from-keychain" {
+		t.Fatalf("want from-keychain, got %q", got)
+	}
+	if src != PassphraseSourceKeychain {
+		t.Fatalf("want PassphraseSourceKeychain, got %v", src)
+	}
+}
+
+func TestPassphrase_KeychainBootstrapEmptyStringRejected(t *testing.T) {
+	t.Setenv("GC_SECRETS_PASSPHRASE", "")
+	withGOOS(t, "darwin")
+	var logs []string
+	logFn := func(format string, args ...interface{}) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	withFakeRunner(t, &fakeCmdRunner{stdout: []byte(""), code: 0})
+	_, _, err := resolvePassphrase(passphraseSources{
+		KeychainAccount: "user@personal",
+		LogFn:           logFn,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no passphrase") {
+		t.Fatalf("empty-keychain must fall through to no-sources error; got %v", err)
+	}
+	matched := false
+	for _, l := range logs {
+		if strings.Contains(l, "ERROR:") && strings.Contains(l, "empty passphrase") {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Fatalf("expected ERROR-level log about empty passphrase; got logs=%v", logs)
+	}
+}
+
+func TestPassphrase_KeychainBootstrapExit44(t *testing.T) {
+	t.Setenv("GC_SECRETS_PASSPHRASE", "")
+	withGOOS(t, "darwin")
+	withFakeRunner(t, &fakeCmdRunner{code: 44})
+	_, _, err := resolvePassphrase(passphraseSources{KeychainAccount: "user@personal"})
+	if err == nil || !strings.Contains(err.Error(), "no passphrase") {
+		t.Fatalf("exit 44 must fall through; got %v", err)
+	}
+}
+
+func TestPassphrase_KeychainBootstrapTimeout(t *testing.T) {
+	t.Setenv("GC_SECRETS_PASSPHRASE", "")
+	withGOOS(t, "darwin")
+	// Force a timeout shorter than the production 5s for test speed.
+	withFakeRunner(t, &fakeCmdRunner{delay: 50 * time.Millisecond})
+	restore := overrideKeychainTimeoutForTest(10 * time.Millisecond)
+	t.Cleanup(restore)
+	_, _, err := resolvePassphrase(passphraseSources{KeychainAccount: "user@personal"})
+	if err == nil || !strings.Contains(err.Error(), "no passphrase") {
+		t.Fatalf("timeout must fall through; got %v", err)
+	}
+}
+
+func TestPassphrase_KeychainBootstrapNonDarwinSkipped(t *testing.T) {
+	t.Setenv("GC_SECRETS_PASSPHRASE", "")
+	withGOOS(t, "linux")
+	r := &fakeCmdRunner{stdout: []byte("ignored"), code: 0}
+	withFakeRunner(t, r)
+	_, _, err := resolvePassphrase(passphraseSources{KeychainAccount: "user@personal"})
+	if err == nil {
+		t.Fatalf("non-darwin: must fall through to no-sources error")
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("non-darwin must not invoke security; got calls=%v", r.calls)
 	}
 }
