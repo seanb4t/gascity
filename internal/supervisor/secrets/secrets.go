@@ -188,6 +188,20 @@ func (l *Loader) wasInLastSet(key string) bool {
 	return ok
 }
 
+// Names returns the names of env vars the loader set on its most
+// recent LoadAll/Reload. Used by the supervisor's HTTP API to report
+// drift status without ever exposing values.
+func (l *Loader) Names() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, 0, len(l.lastSet))
+	for k := range l.lastSet {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // filterByPrefix returns all keys that have the given prefix, sorted.
 func filterByPrefix(keys []string, prefix string) []string {
 	out := make([]string, 0)

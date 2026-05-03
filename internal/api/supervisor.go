@@ -95,7 +95,8 @@ type cachedCityServer struct {
 // on humaAPI:
 //   - Supervisor-scope (registerSupervisorRoutes): GET /v0/cities,
 //     GET /health, GET /v0/readiness, GET /v0/provider-readiness,
-//     POST /v0/city, GET /v0/events, GET /v0/events/stream.
+//     POST /v0/city, GET /v0/events, GET /v0/events/stream,
+//     GET /v1/supervisor/secrets/status.
 //   - Per-city (registerCityRoutes): every operation at
 //     /v0/city/{cityName}/..., resolved at request time via bindCity.
 //
@@ -112,6 +113,7 @@ type SupervisorMux struct {
 	startedAt      time.Time
 	allowedOrigins []string
 	server         *http.Server
+	secretsView    func() []string
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
@@ -167,6 +169,15 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 	humaMux.HandleFunc("/v0/city/{cityName}/svc/", sm.serveCitySvcProxy)
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
+}
+
+// SetSecretsView wires a function that reports the names of secrets
+// currently loaded by the supervisor's secrets.Loader. The closure is
+// evaluated on every request to GET /v1/supervisor/secrets/status; values
+// are read from os.Environ for hashing at request time, so this is safe
+// to call at any point after NewSupervisorMux returns.
+func (sm *SupervisorMux) SetSecretsView(fn func() []string) {
+	sm.secretsView = fn
 }
 
 // serveCitySvcProxy forwards /v0/city/{cityName}/svc/... to the per-city

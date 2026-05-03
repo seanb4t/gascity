@@ -1093,6 +1093,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
 		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
 	}
+	apiMux.SetSecretsView(api.SecretsLoaderView(secretsLoader))
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
