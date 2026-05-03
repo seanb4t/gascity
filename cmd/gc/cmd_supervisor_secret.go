@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/99designs/keyring"
@@ -30,7 +32,8 @@ func newSupervisorSecretCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newSupervisorSecretSetCmd(stdout, stderr))
 	cmd.AddCommand(newSupervisorSecretGetCmd(stdout, stderr))
 	cmd.AddCommand(newSupervisorSecretDeleteCmd(stdout, stderr))
-	// list/reload/import-env subcommands added in Tasks 10/11/12
+	cmd.AddCommand(newSupervisorSecretListCmd(stdout, stderr))
+	// reload/import-env subcommands added in Tasks 11/12
 	return cmd
 }
 
@@ -192,4 +195,131 @@ func isNotFoundErr(err error) bool {
 		return true
 	}
 	return os.IsNotExist(err)
+}
+
+// secretRow holds one row of "gc supervisor secret list" output. The
+// LiveStatus field is "(supervisor down)" until Task 14 wires up the
+// live supervisor query via /v1/supervisor/secrets/status.
+type secretRow struct {
+	Name       string `json:"name"`
+	Configured bool   `json:"configured"`
+	InKeyring  bool   `json:"in_keyring"`
+	LiveStatus string `json:"live_status"`
+	Status     string `json:"status"`
+}
+
+// newSupervisorSecretListCmd returns the "secret list" subcommand that
+// reconciles configured prefixes against keyring contents, reporting
+// OK, MISSING, and ORPHAN rows. Live supervisor status (STALE, MISMATCH)
+// is added in Task 14 once the /v1/supervisor/secrets/status endpoint exists.
+func newSupervisorSecretListCmd(stdout, stderr io.Writer) *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List configured secrets, keyring contents, and live supervisor state",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			cfg, err := loadSupervisorConfigForSecrets()
+			if err != nil {
+				return err
+			}
+			rows, err := buildSecretRows(cfg)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return printSecretRowsJSON(stdout, rows)
+			}
+			return printSecretRowsTable(stdout, rows)
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "output JSON instead of table")
+	return cmd
+}
+
+// buildSecretRows reconciles configured prefixes against keyring contents.
+// Rows are sorted by name. Status values: OK (in keyring and configured),
+// MISSING (configured but absent from keyring), ORPHAN (in keyring but
+// not matched by any configured prefix).
+func buildSecretRows(cfg supervisor.Config) ([]secretRow, error) {
+	ring, err := openSecretRing(cfg)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := ring.Keys()
+	if err != nil {
+		return nil, err
+	}
+
+	prefixes := append([]string{}, cfg.Secrets.Keychain.Prefixes...)
+	if cfg.Secrets.Backend == "file" {
+		prefixes = cfg.Secrets.File.Prefixes
+	}
+
+	matched := make(map[string]bool, len(keys))
+	var rows []secretRow
+	for _, prefix := range prefixes {
+		prefixMatched := false
+		for _, k := range keys {
+			if strings.HasPrefix(k, prefix) {
+				matched[k] = true
+				prefixMatched = true
+				rows = append(rows, secretRow{
+					Name:       k,
+					Configured: true,
+					InKeyring:  true,
+					LiveStatus: "(supervisor down)",
+					Status:     "OK",
+				})
+			}
+		}
+		if !prefixMatched {
+			rows = append(rows, secretRow{
+				Name:       prefix,
+				Configured: true,
+				InKeyring:  false,
+				LiveStatus: "no",
+				Status:     "MISSING",
+			})
+		}
+	}
+	// Orphans: in keyring but not matched by any configured prefix.
+	for _, k := range keys {
+		if !matched[k] {
+			rows = append(rows, secretRow{
+				Name:       k,
+				Configured: false,
+				InKeyring:  true,
+				LiveStatus: "no",
+				Status:     "ORPHAN",
+			})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	return rows, nil
+}
+
+// printSecretRowsTable writes rows as a fixed-width table to out.
+func printSecretRowsTable(out io.Writer, rows []secretRow) error {
+	fmt.Fprintf(out, "%-24s %-11s %-12s %-22s %s\n", "NAME", "CONFIGURED", "IN-KEYRING", "LIVE-IN-SUPERVISOR", "STATUS")
+	for _, r := range rows {
+		fmt.Fprintf(out, "%-24s %-11s %-12s %-22s %s\n",
+			r.Name, yesno(r.Configured), yesno(r.InKeyring), r.LiveStatus, r.Status)
+	}
+	return nil
+}
+
+// yesno returns "yes" if b is true, "no" otherwise.
+func yesno(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+// printSecretRowsJSON writes rows as indented JSON to out.
+func printSecretRowsJSON(out io.Writer, rows []secretRow) error {
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
 }
