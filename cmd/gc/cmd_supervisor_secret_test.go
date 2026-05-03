@@ -211,6 +211,7 @@ prefixes = ["EXA_API_KEY"]
 }
 
 func TestSecretList_DriftDetection(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_API_URL", "http://127.0.0.1:1") // hermetic against any real supervisor on default port
 	dir := t.TempDir()
 	writeTestSupervisorTOML(t, `
 [secrets]

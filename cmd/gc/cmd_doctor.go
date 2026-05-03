@@ -39,7 +39,14 @@ branch.`,
   gc doctor --verbose
   gc doctor --json`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Doctor's mcp-config check runs MCP template expansion via
+			// MCPTemplateData, which consults os.Environ() for keys listed in
+			// agent_defaults.allow_env_override. Load supervisor secrets so
+			// keychain-stored values reach the template context (same wiring
+			// as gc start and gc mcp list). Non-fatal: missing supervisor.toml
+			// or backend errors are ignored.
+			loadStartupSecrets(cmd.Context(), stderr)
 			if doDoctor(fix, verbose, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
