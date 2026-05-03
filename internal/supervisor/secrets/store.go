@@ -47,6 +47,139 @@ const (
 // rather than the bug-prone `time.Duration(seconds) * time.Second` form.
 var tmpSweepAge = 5 * time.Minute
 
+// AgeConfigForTest is the test-only minimal config used by
+// openWithPassphrase. Production Open (Task 11) takes the real
+// supervisor.AgeBackendConfig.
+type AgeConfigForTest struct {
+	Dir string
+}
+
+// openWithPassphrase constructs a *Store, sweeps stale *.age.tmp
+// files, then enforces the stamp invariants per the Open() matrix in
+// engdocs/design/supervisor-secrets-v0.md:
+//
+//	hasSecrets=no, stamp=no   -> eager-write stamp, proceed
+//	hasSecrets=yes, stamp=yes -> verifies (Task 6)
+//	hasSecrets=yes, stamp=no  -> hard error (Task 6)
+//
+// Production Open() (Task 11) wraps this with passphrase resolution.
+func openWithPassphrase(cfg AgeConfigForTest, passphrase string) (*Store, error) {
+	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create %s: %w", cfg.Dir, err)
+	}
+	s := &Store{dir: cfg.Dir, passphrase: passphrase}
+	if err := s.sweepStaleTmps(); err != nil {
+		return nil, err
+	}
+	if err := s.verifyOrInitStamp(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) sweepStaleTmps() error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return fmt.Errorf("read dir: %w", err)
+	}
+	cutoff := time.Now().Add(-tmpSweepAge)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), tmpSuffix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // best-effort
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(s.dir, e.Name()))
+		}
+	}
+	return nil
+}
+
+// hasSecretsOnDisk reports whether any *.age file other than the
+// stamp exists in s.dir.
+func (s *Store) hasSecretsOnDisk() (bool, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return false, fmt.Errorf("read dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == stampFileName || strings.HasSuffix(name, tmpSuffix) {
+			continue
+		}
+		if strings.HasSuffix(name, ageSuffix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Store) stampPath() string {
+	return filepath.Join(s.dir, stampFileName)
+}
+
+func (s *Store) writeStamp() error {
+	rec, err := age.NewScryptRecipient(s.passphrase)
+	if err != nil {
+		return fmt.Errorf("age recipient: %w", err)
+	}
+	tmp := s.stampPath() + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open stamp tmp: %w", err)
+	}
+	w, err := age.Encrypt(f, rec)
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("age encrypt stamp: %w", err)
+	}
+	if _, err := w.Write([]byte(stampPlaintext)); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write stamp: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("age close stamp: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("fsync stamp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close stamp: %w", err)
+	}
+	return os.Rename(tmp, s.stampPath())
+}
+
+// verifyOrInitStamp implements the Open() invariants matrix from the
+// spec. This commit handles only the empty-dir case; the wrong-passphrase
+// and stamp-deleted cases are added in Task 6.
+func (s *Store) verifyOrInitStamp() error {
+	hasSecrets, err := s.hasSecretsOnDisk()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(s.stampPath()); err == nil {
+		// Stamp present — verification deferred to Task 6.
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat stamp: %w", err)
+	}
+	// Stamp absent.
+	if hasSecrets {
+		// Deferred to Task 6: hard error here.
+		return nil
+	}
+	// Empty dir → eager-write stamp.
+	return s.writeStamp()
+}
+
 // Set encrypts value with the store's passphrase and writes <key>.age
 // atomically (write to <key>.age.tmp, fsync, rename). Concurrent Set
 // of distinct keys is safe via per-file atomic rename. Concurrent Set

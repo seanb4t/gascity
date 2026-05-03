@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 // newTestStore returns a *Store rooted at t.TempDir() with a fixed
@@ -94,3 +95,48 @@ func mustWrite(t *testing.T, path string, data []byte) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func TestStore_OpenStampEagerlyWrittenOnEmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	s, err := openForTest(t, dir, "test-pass")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = s
+	stampPath := filepath.Join(dir, stampFileName)
+	if _, err := os.Stat(stampPath); err != nil {
+		t.Fatalf("stamp should exist after Open on empty dir: %v", err)
+	}
+}
+
+func TestStore_StaleTmpSweptAtOpen(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "OLD"+tmpSuffix)
+	fresh := filepath.Join(dir, "NEW"+tmpSuffix)
+	mustWrite(t, stale, []byte("stale"))
+	mustWrite(t, fresh, []byte("fresh"))
+	old := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if _, err := openForTest(t, dir, "test-pass"); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale .tmp should have been swept; stat err=%v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh .tmp should still be present (in-flight write): %v", err)
+	}
+}
+
+// openForTest is a thin wrapper around openWithPassphrase that takes a
+// passphrase directly, bypassing the resolution chain. The production
+// Open() signature does its own resolution; we'll add it in Task 11.
+// Until then, openForTest is a private helper used by store_test.go.
+func openForTest(t *testing.T, dir, passphrase string) (*Store, error) {
+	t.Helper()
+	return openWithPassphrase(AgeConfigForTest{Dir: dir}, passphrase)
+}
+
