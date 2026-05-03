@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -218,6 +219,103 @@ func TestSecretList_LiveSupervisorDimension(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "(supervisor down)") {
 		t.Errorf("want live status, got placeholder:\n%s", stdout.String())
+	}
+}
+
+func TestSet_NewKey(t *testing.T) {
+	cfg := seedTestStore(t, nil)
+	writeSupervisorTOMLForStore(t, cfg)
+	stdin := strings.NewReader("first-value\n")
+	cmd := newSupervisorSecretSetCmd(io.Discard, io.Discard)
+	cmd.SetIn(stdin)
+	cmd.SetArgs([]string{"NEW_KEY", "--from-stdin"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	store, err := secrets.Open(cfg.Secrets.Age)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got, err := store.Get("NEW_KEY")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != "first-value" {
+		t.Fatalf("want first-value, got %q", got)
+	}
+}
+
+func TestSet_OverwritePromptsWithoutForce(t *testing.T) {
+	cfg := seedTestStore(t, map[string]string{"EXA_API_KEY": "old"})
+	writeSupervisorTOMLForStore(t, cfg)
+	stdin := strings.NewReader("n\n")
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd := newSupervisorSecretSetCmd(stdout, stderr)
+	cmd.SetIn(stdin)
+	cmd.SetArgs([]string{"EXA_API_KEY"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	store, err := secrets.Open(cfg.Secrets.Age)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got, err := store.Get("EXA_API_KEY")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != "old" {
+		t.Fatalf("value must be unchanged after declining overwrite; got %q", got)
+	}
+}
+
+func TestSet_OverwriteWithForceSkipsPrompt(t *testing.T) {
+	cfg := seedTestStore(t, map[string]string{"EXA_API_KEY": "old"})
+	writeSupervisorTOMLForStore(t, cfg)
+	stdin := strings.NewReader("new-value\n")
+	cmd := newSupervisorSecretSetCmd(io.Discard, io.Discard)
+	cmd.SetIn(stdin)
+	cmd.SetArgs([]string{"EXA_API_KEY", "--force", "--from-stdin"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	store, err := secrets.Open(cfg.Secrets.Age)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got, err := store.Get("EXA_API_KEY")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != "new-value" {
+		t.Fatalf("value must be replaced under --force; got %q", got)
+	}
+}
+
+func TestSet_FromStdinNoPrompt(t *testing.T) {
+	// --from-stdin is non-interactive by definition; even when the key
+	// already exists, --from-stdin should NOT prompt for overwrite
+	// confirmation (no terminal to prompt).
+	cfg := seedTestStore(t, map[string]string{"EXA_API_KEY": "old"})
+	writeSupervisorTOMLForStore(t, cfg)
+	stdin := strings.NewReader("new-value\n")
+	cmd := newSupervisorSecretSetCmd(io.Discard, io.Discard)
+	cmd.SetIn(stdin)
+	cmd.SetArgs([]string{"EXA_API_KEY", "--from-stdin"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	store, err := secrets.Open(cfg.Secrets.Age)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got, err := store.Get("EXA_API_KEY")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != "new-value" {
+		t.Fatalf("--from-stdin must overwrite without prompting; got %q", got)
 	}
 }
 

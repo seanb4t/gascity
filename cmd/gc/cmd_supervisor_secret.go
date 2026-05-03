@@ -41,12 +41,13 @@ func newSupervisorSecretCmd(stdout, stderr io.Writer) *cobra.Command {
 // newSupervisorSecretSetCmd returns the "secret set" subcommand that
 // stores a named secret in the age store. The value is read from a
 // no-echo terminal prompt by default, or from stdin when --from-stdin
-// is set.
+// is set. When a key already exists the user is prompted to confirm
+// the overwrite unless --force or --from-stdin is given.
 func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fromStdin bool
+	var fromStdin, force bool
 	cmd := &cobra.Command{
 		Use:   "set <NAME>",
-		Short: "Store a secret in the age-encrypted store",
+		Short: "Store a secret in the configured backend",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			name := args[0]
@@ -58,6 +59,15 @@ func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Overwrite confirmation. --from-stdin always proceeds because the
+			// caller is non-interactive.
+			if !force && !fromStdin {
+				if _, err := store.Get(name); err == nil {
+					if !confirm(c.InOrStdin(), stdout, fmt.Sprintf("Secret %q already exists. Overwrite? (y/N): ", name)) {
+						return nil
+					}
+				}
+			}
 			value, err := readSecretValue(c.InOrStdin(), fromStdin)
 			if err != nil {
 				return err
@@ -66,6 +76,7 @@ func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&fromStdin, "from-stdin", false, "read value from stdin instead of prompting")
+	cmd.Flags().BoolVar(&force, "force", false, "skip overwrite confirmation")
 	return cmd
 }
 
