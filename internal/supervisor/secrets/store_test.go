@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -138,5 +140,97 @@ func TestStore_StaleTmpSweptAtOpen(t *testing.T) {
 func openForTest(t *testing.T, dir, passphrase string) (*Store, error) {
 	t.Helper()
 	return openWithPassphrase(AgeConfigForTest{Dir: dir}, passphrase)
+}
+
+func TestStore_OpenWithWrongPassphraseFailsAtStamp(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := openForTest(t, dir, "right-pass"); err != nil {
+		t.Fatalf("Open (init): %v", err)
+	}
+	// Plant a "real" secret under the right passphrase so the dir is non-empty.
+	s := &Store{dir: dir, passphrase: "right-pass"}
+	if err := s.Set("KEY", []byte("v")); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	// Re-open with wrong passphrase.
+	_, err := openForTest(t, dir, "wrong-pass")
+	if err == nil {
+		t.Fatalf("Open with wrong passphrase: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "passphrase does not match") {
+		t.Fatalf("error must mention passphrase mismatch: %v", err)
+	}
+}
+
+func TestStore_OpenStampDeletedNonEmptyStoreRejected(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := openForTest(t, dir, "pass"); err != nil {
+		t.Fatalf("Open (init): %v", err)
+	}
+	s := &Store{dir: dir, passphrase: "pass"}
+	if err := s.Set("KEY", []byte("v")); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	// User accidentally deletes the stamp.
+	if err := os.Remove(filepath.Join(dir, stampFileName)); err != nil {
+		t.Fatalf("remove stamp: %v", err)
+	}
+	_, err := openForTest(t, dir, "pass")
+	if err == nil {
+		t.Fatalf("Open with deleted stamp on non-empty store: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "stamp file missing") {
+		t.Fatalf("error must mention missing stamp: %v", err)
+	}
+	// The stamp must NOT have been silently re-created.
+	if _, err := os.Stat(filepath.Join(dir, stampFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Open must not write a fresh stamp under unknown passphrase; stat err=%v", err)
+	}
+}
+
+// Spec decision row 11 names the stamp plaintext as a load-bearing
+// versioned constant. This test names the constant explicitly so any
+// future commit that renames or rewrites it trips here.
+func TestStore_StampFormatStringIsConstant(t *testing.T) {
+	const want = "gc-supervisor-secrets-stamp-v0\n"
+	if stampPlaintext != want {
+		t.Fatalf("stampPlaintext changed: want %q, got %q. "+
+			"This is a load-bearing on-disk constant — if you really need to "+
+			"change it, ship a new versioned filename and migration path.",
+			want, stampPlaintext)
+	}
+	if stampFileName != ".gc-secrets-stamp-v0.age" {
+		t.Fatalf("stampFileName changed; same versioning rule applies")
+	}
+}
+
+func TestStore_ConcurrentSetDifferentKeys(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := openForTest(t, dir, "pass"); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s := &Store{dir: dir, passphrase: "pass"}
+	var wg sync.WaitGroup
+	keys := []string{"ALPHA", "BETA", "GAMMA", "DELTA"}
+	for _, k := range keys {
+		wg.Add(1)
+		go func(k string) {
+			defer wg.Done()
+			if err := s.Set(k, []byte("v-"+k)); err != nil {
+				t.Errorf("Set %s: %v", k, err)
+			}
+		}(k)
+	}
+	wg.Wait()
+	for _, k := range keys {
+		got, err := s.Get(k)
+		if err != nil {
+			t.Errorf("Get %s: %v", k, err)
+			continue
+		}
+		if string(got) != "v-"+k {
+			t.Errorf("Get %s: want v-%s, got %q", k, k, got)
+		}
+	}
 }
 

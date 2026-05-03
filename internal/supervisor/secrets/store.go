@@ -158,27 +158,81 @@ func (s *Store) writeStamp() error {
 	return os.Rename(tmp, s.stampPath())
 }
 
-// verifyOrInitStamp implements the Open() invariants matrix from the
-// spec. This commit handles only the empty-dir case; the wrong-passphrase
-// and stamp-deleted cases are added in Task 6.
+// verifyOrInitStamp implements the Open() invariants matrix from the spec:
+//
+//	hasSecrets=no, stamp=no   -> eager-write stamp, proceed
+//	stamp=yes (any)           -> verify stamp matches current passphrase
+//	hasSecrets=yes, stamp=no  -> hard error (stamp deleted or passphrase rotated)
 func (s *Store) verifyOrInitStamp() error {
 	hasSecrets, err := s.hasSecretsOnDisk()
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(s.stampPath()); err == nil {
-		// Stamp present — verification deferred to Task 6.
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat stamp: %w", err)
+	_, statErr := os.Stat(s.stampPath())
+	stampPresent := statErr == nil
+	if !stampPresent && !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("stat stamp: %w", statErr)
 	}
-	// Stamp absent.
-	if hasSecrets {
-		// Deferred to Task 6: hard error here.
-		return nil
+
+	switch {
+	case !hasSecrets && !stampPresent:
+		// Brand-new install — eager-write the stamp under the resolved passphrase.
+		return s.writeStamp()
+	case stampPresent:
+		// Stamp present (with or without secrets) — verify it matches the
+		// current passphrase. This catches the wrong-passphrase case for
+		// non-empty stores AND the empty-but-init'd case where someone
+		// re-opens before the first Set.
+		return s.verifyStamp()
+	case hasSecrets && !stampPresent:
+		return fmt.Errorf(
+			"secrets: stamp file missing but %s contains existing .age files; "+
+				"refusing to proceed. If you rotated the passphrase, run "+
+				"'gc supervisor secret rotate-passphrase' (deferred to v2). "+
+				"Until then, the safe recovery is: (a) restore the stamp from backup, "+
+				"or (b) 'rm %s/*.age && gc supervisor secret set ...' to start fresh",
+			s.dir, s.dir,
+		)
 	}
-	// Empty dir → eager-write stamp.
-	return s.writeStamp()
+	return nil
+}
+
+// verifyStamp decrypts the stamp file and confirms its plaintext matches
+// stampPlaintext. Returns a clear error if the passphrase is wrong.
+func (s *Store) verifyStamp() error {
+	f, err := os.Open(s.stampPath())
+	if err != nil {
+		return fmt.Errorf("open stamp: %w", err)
+	}
+	defer f.Close()
+	id, err := age.NewScryptIdentity(s.passphrase)
+	if err != nil {
+		return fmt.Errorf("age identity: %w", err)
+	}
+	r, err := age.Decrypt(f, id)
+	if err != nil {
+		return fmt.Errorf(
+			"secrets: passphrase does not match existing store at %s; "+
+				"refusing to open. If you rotated the passphrase, re-encrypt "+
+				"the store with 'gc supervisor secret rotate-passphrase' "+
+				"(deferred to v2; until then, the manual recovery is: delete "+
+				"%s/*.age and re-run 'gc supervisor secret set' for each key)",
+			s.dir, s.dir,
+		)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		return fmt.Errorf("read stamp: %w", err)
+	}
+	if buf.String() != stampPlaintext {
+		return fmt.Errorf(
+			"secrets: stamp file at %s decoded to unexpected plaintext; "+
+				"this should never happen — the on-disk format may be from a "+
+				"newer gc version. Check the stamp filename version suffix.",
+			s.stampPath(),
+		)
+	}
+	return nil
 }
 
 // Set encrypts value with the store's passphrase and writes <key>.age
