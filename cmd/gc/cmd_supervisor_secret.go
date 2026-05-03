@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/99designs/keyring"
 	"github.com/spf13/cobra"
@@ -33,7 +34,8 @@ func newSupervisorSecretCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newSupervisorSecretGetCmd(stdout, stderr))
 	cmd.AddCommand(newSupervisorSecretDeleteCmd(stdout, stderr))
 	cmd.AddCommand(newSupervisorSecretListCmd(stdout, stderr))
-	// reload/import-env subcommands added in Tasks 11/12
+	cmd.AddCommand(newSupervisorSecretReloadCmd(stdout, stderr))
+	// import-env subcommand added in Task 12
 	return cmd
 }
 
@@ -133,6 +135,32 @@ func newSupervisorSecretDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "skip confirmation prompt")
 	return cmd
+}
+
+// newSupervisorSecretReloadCmd returns the "secret reload" subcommand that
+// sends SIGHUP to the running supervisor, triggering a live secret reload.
+func newSupervisorSecretReloadCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Send SIGHUP to the running supervisor to reload secrets",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			pid := supervisorAliveHook()
+			if pid == 0 {
+				fmt.Fprintln(stderr, "gc supervisor secret reload: supervisor not running")
+				return errExit
+			}
+			proc, err := os.FindProcess(pid)
+			if err != nil {
+				return fmt.Errorf("finding supervisor process %d: %w", pid, err)
+			}
+			if err := proc.Signal(syscall.SIGHUP); err != nil {
+				return fmt.Errorf("sending SIGHUP to PID %d: %w", pid, err)
+			}
+			fmt.Fprintf(stdout, "SIGHUP sent to supervisor (PID %d)\n", pid)
+			return nil
+		},
+	}
 }
 
 // loadSupervisorConfigForSecrets reads the supervisor config file

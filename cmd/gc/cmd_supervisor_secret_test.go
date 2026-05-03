@@ -102,6 +102,20 @@ prefixes = ["EXA_API_KEY"]
 	}
 }
 
+func TestSecretReload_NoSupervisor(t *testing.T) {
+	writeTestSupervisorTOML(t, `[secrets]`)
+	var stdout, stderr bytes.Buffer
+	cmd := newSupervisorSecretReloadCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute = nil, want error when supervisor not running")
+	}
+	if !strings.Contains(stderr.String(), "not running") && !strings.Contains(err.Error(), "not running") {
+		t.Errorf("expected 'not running' message, got stderr=%q err=%v", stderr.String(), err)
+	}
+}
+
 func TestSecretList_DriftDetection(t *testing.T) {
 	dir := t.TempDir()
 	writeTestSupervisorTOML(t, `
