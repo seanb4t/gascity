@@ -35,7 +35,7 @@ func newSupervisorSecretCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newSupervisorSecretDeleteCmd(stdout, stderr))
 	cmd.AddCommand(newSupervisorSecretListCmd(stdout, stderr))
 	cmd.AddCommand(newSupervisorSecretReloadCmd(stdout, stderr))
-	// import-env subcommand added in Task 12
+	cmd.AddCommand(newSupervisorSecretImportEnvCmd(stdout, stderr))
 	return cmd
 }
 
@@ -161,6 +161,78 @@ func newSupervisorSecretReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// newSupervisorSecretImportEnvCmd returns the "secret import-env" subcommand
+// that reads each key listed in $GC_SUPERVISOR_ENV from the current shell
+// environment, writes it to the configured backend, and prints a suggested
+// prefixes block for supervisor.toml.
+func newSupervisorSecretImportEnvCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "import-env",
+		Short: "Migrate from GC_SUPERVISOR_ENV plaintext-in-plist to the secrets backend",
+		Long: `Reads each key listed in $GC_SUPERVISOR_ENV from the current shell
+environment, writes it to the configured backend, and prints a
+suggested [secrets.keychain] (or [secrets.file]) prefixes block to
+add to ~/.gc/supervisor.toml.`,
+		Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			cfg, err := loadSupervisorConfigForSecrets()
+			if err != nil {
+				return err
+			}
+			ring, err := openSecretRing(cfg)
+			if err != nil {
+				return err
+			}
+			raw := os.Getenv("GC_SUPERVISOR_ENV")
+			keys := supervisorServiceExplicitEnvKeys(raw)
+			if len(keys) == 0 {
+				fmt.Fprintln(stderr, "GC_SUPERVISOR_ENV is empty or unset; nothing to import")
+				return nil
+			}
+			var imported []string
+			for _, k := range keys {
+				v := os.Getenv(k)
+				if v == "" {
+					fmt.Fprintf(stderr, "skipping %s: empty in current env\n", k)
+					continue
+				}
+				if err := ring.Set(keyring.Item{Key: k, Data: []byte(v)}); err != nil {
+					fmt.Fprintf(stderr, "set %s: %v\n", k, err)
+					continue
+				}
+				imported = append(imported, k)
+			}
+			sort.Strings(imported)
+			fmt.Fprintf(stdout, "Imported %d secrets to backend %q.\n\n", len(imported), backendOrAuto(cfg.Secrets.Backend))
+			fmt.Fprintln(stdout, "Add the following to ~/.gc/supervisor.toml:")
+			sectionName := "[secrets.keychain]"
+			if cfg.Secrets.Backend == "file" {
+				sectionName = "[secrets.file]"
+			}
+			fmt.Fprintf(stdout, "\n%s\nprefixes = [%s]\n", sectionName, quotedList(imported))
+			return nil
+		},
+	}
+}
+
+// backendOrAuto returns b if non-empty, otherwise "auto".
+func backendOrAuto(b string) string {
+	if b == "" {
+		return "auto"
+	}
+	return b
+}
+
+// quotedList formats items as a comma-separated list of Go-quoted strings
+// suitable for use in a TOML array literal.
+func quotedList(items []string) string {
+	parts := make([]string, len(items))
+	for i, s := range items {
+		parts[i] = fmt.Sprintf("%q", s)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // loadSupervisorConfigForSecrets reads the supervisor config file
