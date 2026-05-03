@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -400,5 +401,30 @@ func TestSet_PromptsOnUnreadableExistingKey(t *testing.T) {
 	}
 	if string(got) != "not-valid-age-ciphertext" {
 		t.Fatalf("declined overwrite must preserve file; got %q", got)
+	}
+}
+
+func TestSecret_PassphraseMismatchPrintsError(t *testing.T) {
+	// Regression: if cobra's SilenceErrors swallows a returned error,
+	// the user sees nothing. Verify the secret subcommands print to
+	// stderr before returning.
+	cfg := seedTestStore(t, map[string]string{"TEST_KEY": "v"})
+	writeSupervisorTOMLForStore(t, cfg)
+	// Now switch passphrase via env. Stamp file was encrypted under
+	// "test-pass" (seedTestStore default); set a different one.
+	t.Setenv(secrets.EnvPassphraseVar, "different-pass")
+	stderr := &bytes.Buffer{}
+	cmd := newSupervisorSecretListCmd(io.Discard, stderr)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetErr(stderr)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute should have returned an error on passphrase mismatch")
+	}
+	if !errors.Is(err, errExit) {
+		t.Errorf("expected errExit; got %v", err)
+	}
+	if !strings.Contains(stderr.String(), "passphrase does not match") {
+		t.Errorf("stderr should contain 'passphrase does not match'; got %q", stderr.String())
 	}
 }

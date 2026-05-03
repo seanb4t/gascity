@@ -21,6 +21,23 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor/secrets"
 )
 
+// printAndExit is the secret-subcommand error convention: print err to
+// stderr with a "gc supervisor secret:" prefix and return errExit so
+// cobra (with SilenceErrors=true at the root) exits non-zero without
+// the error being silently swallowed. Pre-existing errExit returns
+// (commands that already printed their own message) pass through
+// unchanged.
+func printAndExit(stderr io.Writer, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errExit) {
+		return err // already printed at the call site
+	}
+	fmt.Fprintf(stderr, "gc supervisor secret: %v\n", err)
+	return errExit
+}
+
 // newSupervisorSecretCmd returns the "secret" subcommand tree for
 // managing secrets stored in the age-encrypted store.
 func newSupervisorSecretCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -53,11 +70,11 @@ func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
 			name := args[0]
 			cfg, err := loadSupervisorConfigForSecrets()
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			store, err := openSecretStore(cfg)
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			// Overwrite confirmation. --from-stdin always proceeds because the
 			// caller is non-interactive.
@@ -70,7 +87,7 @@ func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			value, err := readSecretValue(c.InOrStdin(), fromStdin)
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			return store.Set(name, []byte(value))
 		},
@@ -92,11 +109,11 @@ func newSupervisorSecretGetCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(c *cobra.Command, args []string) error {
 			cfg, err := loadSupervisorConfigForSecrets()
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			store, err := openSecretStore(cfg)
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			data, err := store.Get(args[0])
 			if err != nil {
@@ -126,11 +143,11 @@ func newSupervisorSecretDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(c *cobra.Command, args []string) error {
 			cfg, err := loadSupervisorConfigForSecrets()
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			store, err := openSecretStore(cfg)
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			if !force {
 				if !confirm(c.InOrStdin(), stdout, fmt.Sprintf("Delete secret %q? (y/N): ", args[0])) {
@@ -138,7 +155,7 @@ func newSupervisorSecretDeleteCmd(stdout, stderr io.Writer) *cobra.Command {
 				}
 			}
 			if err := store.Remove(args[0]); err != nil && !isNotFoundErr(err) {
-				return err
+				return printAndExit(stderr, err)
 			}
 			return nil
 		},
@@ -188,11 +205,11 @@ suggested [secrets.age] keys = [...] block to add to ~/.gc/supervisor.toml.`,
 		RunE: func(c *cobra.Command, args []string) error {
 			cfg, err := loadSupervisorConfigForSecrets()
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			store, err := openSecretStore(cfg)
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			raw := os.Getenv("GC_SUPERVISOR_ENV")
 			keys := supervisorServiceExplicitEnvKeys(raw)
@@ -310,11 +327,11 @@ func newSupervisorSecretListCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(c *cobra.Command, args []string) error {
 			cfg, err := loadSupervisorConfigForSecrets()
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			rows, err := buildSecretRows(cfg)
 			if err != nil {
-				return err
+				return printAndExit(stderr, err)
 			}
 			if asJSON {
 				return printSecretRowsJSON(stdout, rows)
