@@ -293,99 +293,50 @@ func TestDefaultHomePanicsWithoutGCHome(t *testing.T) {
 	DefaultHome()
 }
 
-func TestSecretsConfig_Validate(t *testing.T) {
-	cases := []struct {
-		name      string
-		cfg       SecretsConfig
-		wantErr   bool
-		errSubstr string
-	}{
-		{
-			name:    "empty is valid (defaults to auto)",
-			cfg:     SecretsConfig{},
-			wantErr: false,
-		},
-		{
-			name: "auto backend is valid",
-			cfg:  SecretsConfig{Backend: "auto"},
-		},
-		{
-			name: "keychain backend with valid prefixes",
-			cfg: SecretsConfig{
-				Backend:  "keychain",
-				Keychain: KeychainBackendConfig{Prefixes: []string{"EXA_API_KEY", "LINEAR_"}},
-			},
-		},
-		{
-			name:      "unknown backend rejected",
-			cfg:       SecretsConfig{Backend: "vault"},
-			wantErr:   true,
-			errSubstr: "unknown",
-		},
-		{
-			name: "lowercase prefix rejected",
-			cfg: SecretsConfig{
-				Keychain: KeychainBackendConfig{Prefixes: []string{"exa_api_key"}},
-			},
-			wantErr:   true,
-			errSubstr: "valid env-var name",
-		},
-		{
-			name: "prefix starting with digit rejected",
-			cfg: SecretsConfig{
-				Keychain: KeychainBackendConfig{Prefixes: []string{"1FOO"}},
-			},
-			wantErr:   true,
-			errSubstr: "valid env-var name",
-		},
-		{
-			name: "empty string prefix rejected",
-			cfg: SecretsConfig{
-				Keychain: KeychainBackendConfig{Prefixes: []string{""}},
-			},
-			wantErr:   true,
-			errSubstr: "valid env-var name",
-		},
-		{
-			name: "file backend rejects whitespace-only dir",
-			cfg: SecretsConfig{
-				Backend: "file",
-				File:    FileBackendConfig{Dir: "   ", Prefixes: []string{"EXA_API_KEY"}},
-			},
-			wantErr:   true,
-			errSubstr: "dir",
-		},
-		{
-			name: "file backend requires dir",
-			cfg: SecretsConfig{
-				Backend: "file",
-				File:    FileBackendConfig{Prefixes: []string{"EXA_API_KEY"}},
-			},
-			wantErr:   true,
-			errSubstr: "dir",
-		},
-		{
-			name: "file backend with dir is valid",
-			cfg: SecretsConfig{
-				Backend: "file",
-				File:    FileBackendConfig{Dir: t.TempDir(), Prefixes: []string{"EXA_API_KEY"}},
-			},
-		},
+func TestSecretsConfig_Validate_KeyShape(t *testing.T) {
+	cfg := SecretsConfig{Age: AgeBackendConfig{Keys: []string{"lower-case-bad"}}}
+	err := cfg.Validate(nil)
+	if err == nil || !strings.Contains(err.Error(), "is not a valid env-var name") {
+		t.Fatalf("want shape error, got %v", err)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			err := c.cfg.Validate(nil) // nil reservedKey func uses internal default
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("Validate() = nil, want error containing %q", c.errSubstr)
-				}
-				if c.errSubstr != "" && !strings.Contains(err.Error(), c.errSubstr) {
-					t.Fatalf("Validate() = %v, want error containing %q", err, c.errSubstr)
-				}
-			} else if err != nil {
-				t.Fatalf("Validate() = %v, want nil", err)
-			}
-		})
+}
+
+func TestSecretsConfig_Validate_ReservedKey(t *testing.T) {
+	cfg := SecretsConfig{Age: AgeBackendConfig{Keys: []string{"PATH"}}}
+	err := cfg.Validate(nil)
+	if err == nil || !strings.Contains(err.Error(), "would shadow reserved env var") {
+		t.Fatalf("want reserved error, got %v", err)
+	}
+}
+
+func TestSecretsConfig_Validate_GoodCaseAccepted(t *testing.T) {
+	cfg := SecretsConfig{Age: AgeBackendConfig{Keys: []string{"EXA_API_KEY", "FIRECRAWL_KEY"}}}
+	if err := cfg.Validate(nil); err != nil {
+		t.Fatalf("want nil, got %v", err)
+	}
+}
+
+func TestLoadConfig_RejectsUnknownSecretsSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "supervisor.toml")
+	body := `
+[supervisor]
+port = 1234
+
+[secrets.keychain]
+keys = ["EXA_API_KEY"]
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatalf("LoadConfig must reject [secrets.keychain]")
+	}
+	for _, want := range []string{"secrets.keychain", "supervisor-secrets-v0", "switching"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error must mention %q; got %v", want, err)
+		}
 	}
 }
 

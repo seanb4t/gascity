@@ -137,8 +137,25 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return cfg, err
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		// Surface the most-actionable case explicitly: stale CGo-branch
+		// [secrets.keychain] / [secrets.file] sections.
+		for _, k := range undecoded {
+			key := k.String()
+			if strings.HasPrefix(key, "secrets.") {
+				return cfg, fmt.Errorf(
+					"unknown key %q in %s. Did you mean to migrate from the "+
+						"feat/supervisor-secrets-keychain branch? See "+
+						"engdocs/design/supervisor-secrets-v0.md#switching-from-the-cgo-branch",
+					key, path,
+				)
+			}
+		}
+		return cfg, fmt.Errorf("unknown keys in %s: %v", path, undecoded)
 	}
 	return cfg, nil
 }
@@ -269,99 +286,54 @@ func reserveLoopbackPort() (int, error) {
 	return addr.Port, nil
 }
 
-// SecretsConfig declares which secrets the supervisor loads at startup
-// and how to source them. See engdocs/design/supervisor-secrets-v0.md.
+// SecretsConfig configures the supervisor's age-encrypted secret store.
+// See engdocs/design/supervisor-secrets-v0.md.
 type SecretsConfig struct {
-	// Backend selects the secret store. One of: "auto", "keychain",
-	// "secret-service", "file", "pass". Empty defaults to "auto", which
-	// picks the platform-native backend (keychain on macOS,
-	// secret-service on Linux, wincred on Windows).
-	Backend string `toml:"backend,omitempty"`
-
-	Keychain KeychainBackendConfig `toml:"keychain,omitempty"`
-	File     FileBackendConfig     `toml:"file,omitempty"`
+	Age AgeBackendConfig `toml:"age,omitempty"`
 }
 
-// KeychainBackendConfig configures the keyring abstraction for
-// platform-native backends (macOS Keychain, Linux Secret Service,
-// Windows Credential Manager). The same struct serves all three;
-// 99designs/keyring abstracts platform differences.
-type KeychainBackendConfig struct {
-	// ServiceName is the umbrella identifier under which secrets are
-	// stored. Defaults to "gc-supervisor".
-	ServiceName string `toml:"service_name,omitempty"`
+// AgeBackendConfig configures the per-secret age-encrypted file store.
+type AgeBackendConfig struct {
+	// Dir is where <KEY>.age files (and the .gc-secrets-stamp-v0.age sentinel)
+	// are stored. Default "$GC_HOME/secrets" (typically ~/.gc/secrets).
+	Dir string `toml:"dir,omitempty"`
 
-	// Account is the keyring item account field. Defaults to
-	// "$USER@personal" at load time.
-	Account string `toml:"account,omitempty"`
+	// PassphraseFile is the path to the optional 0600 keyfile holding the
+	// age passphrase. Default "$GC_HOME/.secrets-passphrase" — sibling of
+	// Dir, NOT inside it, to avoid filename collisions with secret files.
+	PassphraseFile string `toml:"passphrase_file,omitempty"`
 
-	// Prefixes is the list of service-name prefixes to load. Each entry
-	// matches keyring items whose Key starts with the prefix. Exact
-	// env-var names work as one-result prefixes.
-	Prefixes []string `toml:"prefixes"`
+	// PassphraseKeychainAccount is the account field for the macOS Keychain
+	// passphrase-bootstrap lookup (darwin only). Default "$USER@personal".
+	// Used only when env + keyfile resolution failed. The Keychain item is
+	// identified by service_name="gc-supervisor-passphrase" + this account;
+	// gc never writes to it (the user runs `security add-generic-password`
+	// once manually to seed it).
+	PassphraseKeychainAccount string `toml:"passphrase_keychain_account,omitempty"`
+
+	// Keys are the env-var names to load. Each must exist as <KEY>.age
+	// under Dir at supervisor startup; missing keys WARN-and-continue.
+	Keys []string `toml:"keys"`
 }
 
-// FileBackendConfig configures the encrypted-file backend. Used for
-// tests, headless deploys, and CI.
-type FileBackendConfig struct {
-	// Dir is the directory where encrypted secret files are stored.
-	// Required when Backend = "file".
-	Dir string `toml:"dir"`
-
-	// Prefixes — same semantics as KeychainBackendConfig.Prefixes.
-	Prefixes []string `toml:"prefixes"`
-}
-
-var validSecretBackends = map[string]bool{
-	"":               true, // empty string treated as "auto" — supports unset toml field
-	"auto":           true,
-	"keychain":       true,
-	"secret-service": true,
-	"file":           true,
-	"pass":           true,
-	"wincred":        true,
-}
-
-// envVarNameRE matches uppercase POSIX env-var names. Stricter than
-// supervisorServiceEnvNameRE (cmd/gc/cmd_supervisor_lifecycle.go:381),
-// which is case-insensitive. The tighter rule here reflects that
-// secret prefixes should follow POSIX convention (uppercase only) —
-// users who type lowercase prefixes get a fast-fail at config-load
-// time rather than silent zero-match at keyring-enumerate time.
+// envVarNameRE matches uppercase POSIX env-var names.
 var envVarNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
-// Validate checks the configuration for shape errors. The
-// reservedKey predicate is injected by the caller (cmd/gc passes
-// isReservedSupervisorEnvKey); when nil, a minimal default that
-// recognizes only PATH and GC_HOME is used.
+// Validate checks the configuration for shape errors. The reservedKey
+// predicate is injected by the caller; nil falls back to a minimal
+// default recognizing only PATH and GC_HOME.
 func (c SecretsConfig) Validate(reservedKey func(string) bool) error {
-	if !validSecretBackends[c.Backend] {
-		return fmt.Errorf("secrets.backend: unknown value %q (allowed: auto, keychain, secret-service, file, pass, wincred)", c.Backend)
-	}
 	if reservedKey == nil {
 		reservedKey = func(name string) bool {
 			return name == "PATH" || name == "GC_HOME"
 		}
 	}
-	if err := validatePrefixList("secrets.keychain.prefixes", c.Keychain.Prefixes, reservedKey); err != nil {
-		return err
-	}
-	if err := validatePrefixList("secrets.file.prefixes", c.File.Prefixes, reservedKey); err != nil {
-		return err
-	}
-	if c.Backend == "file" && strings.TrimSpace(c.File.Dir) == "" {
-		return fmt.Errorf("secrets.file.dir: required when backend = \"file\"")
-	}
-	return nil
-}
-
-func validatePrefixList(label string, prefixes []string, reservedKey func(string) bool) error {
-	for i, p := range prefixes {
-		if !envVarNameRE.MatchString(p) {
-			return fmt.Errorf("%s[%d]: %q is not a valid env-var name (must match [A-Z_][A-Z0-9_]*)", label, i, p)
+	for i, k := range c.Age.Keys {
+		if !envVarNameRE.MatchString(k) {
+			return fmt.Errorf("secrets.age.keys[%d]: %q is not a valid env-var name (must match [A-Z_][A-Z0-9_]*)", i, k)
 		}
-		if reservedKey(p) {
-			return fmt.Errorf("%s[%d]: %q would shadow reserved env var", label, i, p)
+		if reservedKey(k) {
+			return fmt.Errorf("secrets.age.keys[%d]: %q would shadow reserved env var", i, k)
 		}
 	}
 	return nil
