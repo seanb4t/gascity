@@ -617,3 +617,20 @@ unchanged for single-city users.
 - URL prefix: `/v0/tenant/{tenant}/city/{city}/...`
 
 **Delivers:** Multi-customer hosting on shared infrastructure.
+
+## External secrets
+
+Third-party API keys (EXA, Firecrawl, etc.) should be loaded via the
+in-process secrets backend rather than `GC_SUPERVISOR_ENV` (which
+snapshots plaintext into the plist). See
+`engdocs/design/supervisor-secrets-v0.md` for the full design.
+
+Common-case recipe:
+
+```bash
+gc supervisor secret set EXA_API_KEY     # prompts for value
+# Add to ~/.gc/supervisor.toml:
+#   [secrets.keychain]
+#   prefixes = ["EXA_API_KEY"]
+gc supervisor restart                     # or: gc supervisor secret reload
+```

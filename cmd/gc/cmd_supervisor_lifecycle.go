@@ -262,7 +262,13 @@ func newSupervisorInstallCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "install",
 		Short: "Install the supervisor as a platform service",
 		Long: `Install the machine-wide supervisor as a platform service that
-starts on login.`,
+starts on login.
+
+Note: for third-party API keys (EXA, Firecrawl, etc.), prefer the
+[secrets.keychain] mechanism in ~/.gc/supervisor.toml over
+GC_SUPERVISOR_ENV. The latter snapshots plaintext into the plist;
+the former loads from the OS keychain in-process.
+See engdocs/design/supervisor-secrets-v0.md.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorInstall(stdout, stderr) != 0 {
