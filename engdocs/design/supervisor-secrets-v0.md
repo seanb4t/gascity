@@ -96,7 +96,7 @@ This matches the existing `runtime.GOOS` switch pattern in the CGo branch's
 | 8 | "Full sync" reload semantics | Keys removed from the store between reloads are `os.Unsetenv`'d. Tracked via `lastSet` map on the `Loader`. |
 | 9 | age on-disk format: one file per secret under `cfg.Age.Dir` | `<dir>/<KEY>.age` per secret, atomic rename via `<KEY>.age.tmp`. Per-file blast radius — corrupting one file doesn't lose the others. No global lock needed for concurrent `set` of different keys. |
 | 10 | Passphrase resolution chain: env → keyfile → macOS Keychain → TTY prompt | Each step is more explicit than the next. CI uses env (`GC_SECRETS_PASSPHRASE`), daily-driver macOS uses Keychain (one `security` call at startup, no per-secret subprocess), Linux daily-driver uses a `0600` keyfile, interactive prompt is the last resort. |
-| 11 | Passphrase verification at `Open()` via sentinel file | First `Set` writes a `.gc-secrets-stamp.age` containing a known plaintext. Subsequent `Open` calls decrypt-and-verify the stamp before serving any `Get`/`Set`. Mismatch fails fast with a clear error rather than silently surfacing per-secret decryption errors. |
+| 11 | Passphrase verification at `Open()` via versioned sentinel file | `Open()` eagerly writes `.gc-secrets-stamp-v0.age` on a brand-new store and **requires** it on any non-empty store; missing stamp + existing `*.age` files is a hard error (refuses to write a fresh stamp under a possibly-wrong passphrase). Mismatch fails fast with an actionable rotation message. The `-v0` is part of the on-disk format — future format changes ship a new versioned name with explicit migration. |
 | 12 | Passphrase keyfile lives **outside** the secrets dir | Default `~/.gc/.secrets-passphrase` (sibling of `~/.gc/secrets/`), not inside it. Avoids any naming collision with `<KEY>.age` files and makes the secrets dir contain only `*.age` plus the stamp. |
 
 ## Architecture
@@ -107,30 +107,31 @@ This matches the existing `runtime.GOOS` switch pattern in the CGo branch's
 
 ```
 internal/supervisor/secrets/
-├── backend.go        # Backend interface + Open() constructor + ErrNotFound sentinel
-├── secrets.go        # public API: Loader, LoadAll, Reload (consumes Backend)
-├── secrets_test.go   # unit tests using ageBackend in t.TempDir()
-├── age.go            # ageBackend: per-file age encryption under cfg.Age.Dir
-├── age_test.go       # round-trip + corruption + concurrency tests
+├── store.go          # Store struct (the sole concrete type), Open(), ErrNotFound sentinel
+├── store_test.go     # round-trip + corruption + concurrency + sweep tests
+├── secrets.go        # public API: Loader, LoadAll, Reload (consumes *Store directly)
+├── secrets_test.go   # Loader unit tests using *Store in t.TempDir()
 ├── passphrase.go     # passphrase resolution: env → keyfile → macOS Keychain → TTY
 └── passphrase_test.go
 ```
 
-**Why a `Backend` interface with one current implementation:** the v1 spec ships
-only the age backend, but the CLI and `Loader` consume an interface
-(`Get`/`Set`/`Remove`/`Keys`) so that (a) tests can substitute an in-memory
-fake without touching real filesystem state, (b) future backends — e.g., a
-Linux Secret Service driver, or 1Password integration — slot in without
-disturbing call sites. The "no premature abstraction" rule is satisfied by the
-test-fake counting as a real second implementation.
+**No `Backend` interface.** Per AGENTS.md ("Don't build interfaces until two
+implementations exist"), the CLI and `Loader` consume the concrete `*Store`
+type directly. Test isolation is achieved by `t.TempDir()` + a real `Store`
+constructed against that directory + `t.Setenv("GC_SECRETS_PASSPHRASE", ...)`
+— there's nothing to fake because the real implementation is already a
+filesystem-only object with no external dependencies.
 
-This is the same pattern gascity follows elsewhere (e.g., `internal/api/genclient`
-insulates HTTP types from the domain model).
+If a future backend (1Password, Linux Secret Service) ever lands, it ships as
+a separate branch per the upstream "pick a branch" stance — same as how this
+branch and the CGo branch coexist. A runtime discriminator inside one binary
+would never have a second valid value, so the interface would be premature
+both today and in the foreseeable future.
 
 ### Wired into
 
 - `cmd/gc/cmd_supervisor_lifecycle.go` — `runSupervisor` calls `secrets.LoadAll(cfg)` after config load, before API server bind. SIGHUP handler installed.
-- `cmd/gc/cmd_supervisor_secret.go` — registers the `gc supervisor secret` subcommand tree. Consumes `secrets.Backend` interface only; no direct keyring-library types.
+- `cmd/gc/cmd_supervisor_secret.go` — registers the `gc supervisor secret` subcommand tree. Consumes `*secrets.Store` directly; no third-party keyring-library types.
 - `internal/supervisor/config.go` — extends `Config` with `Secrets SecretsConfig` field + validation.
 - `internal/api/` — endpoint `GET /v1/supervisor/secrets/status` for drift detection.
 
@@ -145,13 +146,16 @@ type Config struct {
     Secrets     SecretsConfig     `toml:"secrets,omitempty"`
 }
 
+// SecretsConfig has no Backend discriminator — the only v1 backend is age,
+// and presence of [secrets.age] is sufficient. Future backends (1Password,
+// secret-service) ship as separate branches per the upstream "pick a branch"
+// stance, so a runtime discriminator would never have a second valid value.
 type SecretsConfig struct {
-    Backend string           `toml:"backend,omitempty"` // "" or "age" (v1)
-    Age     AgeBackendConfig `toml:"age,omitempty"`
+    Age AgeBackendConfig `toml:"age,omitempty"`
 }
 
 type AgeBackendConfig struct {
-    // Dir is where <KEY>.age files (and the .gc-secrets-stamp.age sentinel)
+    // Dir is where <KEY>.age files (and the .gc-secrets-stamp-v0.age sentinel)
     // are stored. Default "$GC_HOME/secrets" (typically ~/.gc/secrets).
     Dir string `toml:"dir,omitempty"`
 
@@ -160,13 +164,15 @@ type AgeBackendConfig struct {
     // Dir, NOT inside it, to avoid filename collisions with secret files.
     PassphraseFile string `toml:"passphrase_file,omitempty"`
 
-    // KeychainAccount is the account field for the macOS Keychain
-    // passphrase-bootstrap lookup. Default "$USER@personal". Used only on
-    // darwin, only when env + keyfile resolution failed. The Keychain item
-    // is identified by service_name="gc-supervisor-passphrase" + this
-    // account; gc never writes to it (the user runs `security
-    // add-generic-password` once manually to seed it).
-    KeychainAccount string `toml:"keychain_account,omitempty"`
+    // PassphraseKeychainAccount is the account field for the macOS-Keychain
+    // passphrase-bootstrap lookup (darwin only). Default "$USER@personal".
+    // Used only when env + keyfile resolution failed. The Keychain item is
+    // identified by service_name="gc-supervisor-passphrase" + this account;
+    // gc never writes to it (the user runs `security add-generic-password`
+    // once manually to seed it). Empty values returned by Keychain are
+    // rejected — a successful bootstrap returning "" indicates the user
+    // mis-set the item and must be surfaced as ERROR, not silently used.
+    PassphraseKeychainAccount string `toml:"passphrase_keychain_account,omitempty"`
 
     // Keys are the env-var names to load. Each must exist as <KEY>.age
     // under Dir at supervisor startup; missing keys WARN-and-continue.
@@ -180,31 +186,30 @@ type AgeBackendConfig struct {
 [supervisor]
 port = 9876
 
-[secrets]
-# backend = "age" is the default and only allowed value in v1.
-# Omit or set explicitly. Anything else fails validation with a pointer
-# to the parallel feat/supervisor-secrets-keychain branch for users who
-# want OS-keychain integration.
-
 [secrets.age]
 keys = ["EXA_API_KEY", "FIRECRAWL_KEY", "LINEAR_TOKEN"]
 # Each entry is an exact env-var name. Files at <dir>/<KEY>.age must be
 # present at startup; missing files WARN-and-continue. Defaults:
-#   dir              = "$GC_HOME/secrets"
-#   passphrase_file  = "$GC_HOME/.secrets-passphrase"  (optional 0600 keyfile)
-#   keychain_account = "$USER@personal"                (macOS bootstrap only)
+#   dir                          = "$GC_HOME/secrets"
+#   passphrase_file              = "$GC_HOME/.secrets-passphrase"  (optional 0600 keyfile)
+#   passphrase_keychain_account  = "$USER@personal"                (macOS bootstrap only)
 ```
+
+Any unrecognized `[secrets.*]` section (e.g., a stale `[secrets.keychain]`
+left over from the CGo branch) is rejected by the TOML decoder's strict-mode
+loader with a pointer to the migration section below.
 
 ### Filesystem layout under `cfg.Age.Dir`
 
 ```
 ~/.gc/secrets/
-├── EXA_API_KEY.age          # ciphertext of EXA_API_KEY's value
+├── EXA_API_KEY.age              # ciphertext of EXA_API_KEY's value
 ├── FIRECRAWL_KEY.age
 ├── LINEAR_TOKEN.age
-├── .gc-secrets-stamp.age    # sentinel for passphrase verification
-└── <key>.age.tmp            # temporary, only during atomic rename
-                             # filtered out by Keys()/LoadAll
+├── .gc-secrets-stamp-v0.age     # sentinel for passphrase verification (versioned)
+└── <key>.age.tmp                # temporary, only during atomic rename;
+                                 # filtered out by Keys()/LoadAll;
+                                 # swept at Open() if older than 5 minutes
 ```
 
 The passphrase keyfile (`~/.gc/.secrets-passphrase`) is **not** in this
@@ -217,7 +222,7 @@ Implemented as `func (c SecretsConfig) Validate(reservedKey func(string) bool) e
 
 | Rule | Error |
 |---|---|
-| `Backend` not `""` or `"age"` (v1) | `secrets.backend: %q is not supported in this build; only "age" is available. For OS-keychain integration use the feat/supervisor-secrets-keychain branch.` |
+| Unknown `[secrets.*]` section in TOML (e.g., `[secrets.keychain]`) | TOML strict-decode error: `unknown key "secrets.keychain". Did you mean to migrate from the feat/supervisor-secrets-keychain branch? See engdocs/design/supervisor-secrets-v0.md#switching-from-the-cgo-branch.` |
 | Key doesn't match env-var-name shape | `secrets.age.keys[%d]: %q is not a valid env-var name`. **Reuse `supervisorServiceEnvNameRE` from `cmd_supervisor_lifecycle.go:381`** — promote it to a package-level export rather than duplicating the regex literal. |
 | Key shadows reserved env var | `secrets.age.keys[%d]: %q would shadow reserved env var`. Check against the union of `supervisorServiceFixedEnvKeys` (GC_HOME, PATH, XDG_RUNTIME_DIR — supervisor sets these itself) and `supervisorServiceEnvKeys` (HOME, USER, SHELL, LANG, etc. — auto-persist whitelist). Implementation: extract a single `isReservedSupervisorEnvKey(name) bool` helper in `cmd/gc/cmd_supervisor_lifecycle.go` that consults both maps; call it from both the install path's existing checks and the new `SecretsConfig.Validate`. |
 
@@ -230,38 +235,99 @@ resolution chain — most explicit user intent wins:
 1. **`GC_SECRETS_PASSPHRASE` env var.** Non-empty value used directly. Intended
    for CI, headless systemd-managed gc, and container deployments.
 2. **Keyfile at `cfg.Age.PassphraseFile`** (default `~/.gc/.secrets-passphrase`).
-   Plain UTF-8, mode strictly `0600` (mode verified by `os.Stat` — any
-   `mode & 0o077 != 0` is **rejected with a hard error** at `Open()`, not
-   auto-fixed: a wrong-permissions keyfile is a configuration mistake the user
-   should fix consciously, not have papered over). Use case: "save once, never
-   type again" on Linux daily-drivers.
-3. **macOS Keychain bootstrap (darwin only).** A single read-only call:
-   `security find-generic-password -s gc-supervisor-passphrase -a $account -w`.
-   Exit 0 → stdout (one trailing newline stripped) is the passphrase. Exit 44
-   → not found, fall through to step 4. Other non-zero → log WARN, fall
-   through to step 4. **gc never writes to this Keychain item.** The user
-   seeds it once, manually, with `security add-generic-password -U -s gc-supervisor-passphrase -a $account` — note no `-w` argument so `security` reads the password from stdin/terminal, not argv (avoids process-table leak). Documented in the migration section.
-4. **Interactive TTY prompt.** `golang.org/x/term.IsTerminal` checked first;
-   non-TTY → fail with the documented error message verbatim
-   (`"no passphrase: set GC_SECRETS_PASSPHRASE, place a 0600 keyfile at <path>, run on macOS with the gc-supervisor-passphrase Keychain item, or run interactively"`).
+   Verification before read:
+   - `os.Lstat` (NOT `os.Stat`) — refuses to follow symlinks. A symlinked
+     keyfile is rejected with a hard error: `passphrase file is a symlink; refuse to follow`.
+     Prevents symlink-to-`/dev/stdin` and similar attacks.
+   - Owning UID must equal current EUID; mismatch → hard error.
+   - Mode strictly `0600` — any `mode & 0o077 != 0` is rejected (`passphrase file %q has insecure mode %#o; chmod 0600`). Not auto-fixed; a wrong-permissions keyfile is a configuration mistake the user should fix consciously.
+   - **Known limitation:** macOS extended ACLs and Linux POSIX ACLs are *not*
+     checked — `os.Lstat`'s `Mode()` doesn't see them. A user who runs
+     `chmod +a "everyone allow read" ~/.gc/.secrets-passphrase` on macOS or
+     `setfacl -m u:other:r ~/.gc/.secrets-passphrase` on Linux can defeat
+     this check. Documented as a known limitation; not fixable without
+     platform-specific syscalls. Users are responsible for not running
+     those commands.
+   Read content as plain UTF-8; strip exactly one trailing `\n` if present
+   (so users can `echo "pass" >> file` without surprises). Empty content →
+   skip this step, fall through to step 3.
+3. **macOS Keychain bootstrap (darwin only).** Subprocess call wrapped in a
+   `context.WithTimeout(ctx, 5*time.Second)` so a locked-keychain GUI prompt
+   on a headless / launchd-managed supervisor cannot hang startup forever:
+   ```
+   security find-generic-password -s gc-supervisor-passphrase -a $account -w
+   ```
+   Outcomes:
+   - **Exit 0, non-empty stdout** → strip one trailing `\n`, use as passphrase.
+   - **Exit 0, empty stdout** → log ERROR (`Keychain bootstrap returned empty passphrase; the gc-supervisor-passphrase item is mis-set. Re-seed with: security add-generic-password -U -s gc-supervisor-passphrase -a $account -w`) and fall through to step 4. Empty-string passphrase is **never** accepted from this path — the same flag combination that produced an empty item could just as easily produce an attacker-controlled empty store.
+   - **Exit 44** → "not found", fall through to step 4 silently.
+   - **Other non-zero** → log WARN with stderr, fall through to step 4.
+   - **Context deadline exceeded** → log WARN (`Keychain lookup timed out after 5s; is the login keychain locked?`), fall through to step 4.
+
+   **gc never writes to this Keychain item.** The user seeds it once, manually
+   (see migration section). The `-T ""` argument when seeding sets an empty
+   trusted-app list, meaning every `security` access prompts the user — but
+   the supervisor caches the unlocked passphrase for its lifetime, so prompts
+   only happen on supervisor restart.
+4. **Interactive TTY prompt.** `term.IsTerminal(int(os.Stdin.Fd()))` checked
+   first; non-TTY → fail with the documented error message verbatim
+   (`"no passphrase: set GC_SECRETS_PASSPHRASE, place a 0600 keyfile at <path>, on macOS seed the gc-supervisor-passphrase Keychain item, or run interactively"`).
    TTY case → `term.ReadPassword(int(os.Stdin.Fd()))`.
 
 ### Passphrase verification at Open
 
-Each `Open()` decrypts a sentinel file `<cfg.Age.Dir>/.gc-secrets-stamp.age`
-before serving any `Get`/`Set`. The stamp's plaintext is a constant
-`gc-supervisor-secrets-stamp-v0`. Three cases:
+The stamp file `<cfg.Age.Dir>/.gc-secrets-stamp-v0.age` is a sentinel encrypted
+with the same passphrase as the secrets. Its plaintext is a load-bearing
+versioned constant: `gc-supervisor-secrets-stamp-v0\n`. The `-v0` suffix in
+both the filename and the plaintext is permanent — any future format change
+ships a new versioned name (`-v1`) with a coexistence/migration story; the
+current names never change in place.
 
-- **No stamp file present** (first-ever `Open`): the first successful `Set`
-  creates one atomically, encrypted with the resolved passphrase.
-- **Stamp present, decrypts successfully**: continue.
-- **Stamp present, decrypts to wrong plaintext or fails**: `Open()` returns a
-  hard error: `secrets: passphrase does not match existing store at <dir>; refusing to open. If you rotated the passphrase, re-encrypt the store with 'gc supervisor secret rotate-passphrase' (deferred to v2; until then, delete <dir> and re-run 'gc supervisor secret set' for each key).`
+#### Open() invariants
 
-This catches the silent-decryption-failure mode the adversarial review flagged:
-without the stamp, a user who changes their `GC_SECRETS_PASSPHRASE` would see
-each `Get` fail individually as a "decryption error" with no clear
-attribution. With it, `Open()` fails up front with an actionable message.
+Let `hasSecrets` = at least one `*.age` file exists in `cfg.Age.Dir` other
+than the stamp itself (and excluding `*.age.tmp` files). The matrix:
+
+| State | `hasSecrets` | Stamp present | Stamp verifies | Open() behavior |
+|---|---|---|---|---|
+| Brand-new install | no  | no  | n/a | **Eagerly write stamp** with current passphrase, then proceed. First `Get`/`Set` after this is verified. |
+| Healthy store     | yes | yes | yes | Proceed. |
+| Wrong passphrase  | yes | yes | no  | Hard error (see below). |
+| **Stamp deleted, store intact** | yes | no | n/a | **Hard error.** Refuse to write a fresh stamp under current passphrase, because a "new" stamp under a possibly-wrong passphrase would silently mask decryption errors on every existing key. Error: `secrets: stamp file missing but <dir> contains existing .age files; refusing to proceed. If you rotated the passphrase, run 'gc supervisor secret rotate-passphrase' (v2). Until then, the safe recovery is: (a) restore the stamp from backup, or (b) 'rm <dir>/*.age && gc supervisor secret set ...' to start fresh.` |
+| First Set after init | no | yes (eager-written) | yes | Proceed. |
+
+The "brand-new install" case eagerly writes the stamp at `Open()` time, *not*
+lazily on first `Set`. This closes the previously-flagged "user typos
+passphrase on day one, only finds out on day two" hole — if the user typoed
+their passphrase, the next `Open()` (e.g., `gc supervisor secret list`) will
+already have written a stamp under the typo and will Verify-OK. **There is no
+way to detect a typo on a brand-new store.** This is a fundamental limitation
+of single-passphrase symmetric encryption with no out-of-band confirmation,
+and gc accepts it. The CLI's `set` confirmation flow on the very first secret
+prints the resolved passphrase source (`"using passphrase from
+GC_SECRETS_PASSPHRASE"` / `"…from keyfile"` / `"…from macOS Keychain"` /
+`"…from interactive prompt"`) so the user can sanity-check the chain at the
+moment of first commit.
+
+**Wrong-passphrase error message** (state row 3):
+```
+secrets: passphrase does not match existing store at <dir>; refusing to open.
+If you rotated the passphrase, re-encrypt the store with
+'gc supervisor secret rotate-passphrase' (deferred to v2; until then, the
+manual recovery is: delete <dir>/*.age and re-run 'gc supervisor secret set'
+for each key).
+```
+
+This single check catches every silent-decryption-failure mode the previous
+adversarial review flagged.
+
+#### Stale `*.age.tmp` sweep at Open()
+
+Before evaluating `hasSecrets`, `Open()` scans `cfg.Age.Dir` and removes any
+`*.age.tmp` file whose mtime is older than 5 minutes. Rationale: any normal
+write completes (rename to `.age`) in milliseconds; a `.tmp` older than 5min
+is a crashed `set` that the user has already moved on from. The sweep keeps
+the secrets dir from accumulating stale temp files invisibly.
 
 ### Coexistence with `GC_SUPERVISOR_ENV`
 
@@ -313,13 +379,13 @@ func (l *Loader) LoadAll(ctx context.Context, cfg SecretsConfig) (Result, error)
 
 Per-load:
 
-1. `secrets.Open(cfg)` — returns the age `Backend`. `Open` resolves the
-   passphrase via the chain in "Passphrase resolution" above and verifies
-   against the stamp file. If any of that fails, return `(Result{}, err)`;
-   caller logs ERROR and continues. Supervisor stays up with no secrets
-   loaded.
+1. `secrets.Open(cfg)` — returns the age `*Store`. `Open` resolves the
+   passphrase via the chain in "Passphrase resolution" above, sweeps stale
+   `*.age.tmp` files, and verifies against the stamp file per the matrix
+   above. If any of that fails, return `(Result{}, err)`; caller logs ERROR
+   and continues. Supervisor stays up with no secrets loaded.
 2. For each configured key (exact match — no prefix expansion):
-   - `backend.Get(key)`.
+   - `store.Get(key)`.
      - `ErrNotFound` → append to `Result.Missing`, continue.
      - Other error → append to `Result.Errors`, continue.
      - Success with empty bytes → append to `Result.Skipped`, do not
@@ -328,11 +394,11 @@ Per-load:
        `Result.Set`.
 3. Update `l.lastSet` (used by `Reload` for full-sync semantics).
 
-`backend.Keys()` is **not** called by `LoadAll` — keys come from the config's
+`store.Keys()` is **not** called by `LoadAll` — keys come from the config's
 exact-match `keys` list. `Keys()` is exclusively used by the CLI's `list`
 command for drift detection (orphan reporting), and reads `os.ReadDir(cfg.Age.Dir)`
-filtered to files matching `*.age` and **not** ending in `.age.tmp` or named
-`.gc-secrets-stamp.age`.
+filtered to files matching `*.age` and **not** ending in `.age.tmp` and
+**not** equal to `.gc-secrets-stamp-v0.age`.
 
 ### Failure-mode matrix
 
@@ -340,7 +406,7 @@ filtered to files matching `*.age` and **not** ending in `.age.tmp` or named
 |---|---|---|
 | `secrets.Open()` fails (bad config / missing passphrase / CLI exec failure) | Return error; supervisor logs ERROR and continues. Not fatal. | ERROR |
 | Configured key not present in backend (`ErrNotFound`) | Append to `Missing`, continue. | WARN |
-| `backend.Get(key)` fails (permission, decryption, transport) | Append to `Errors`, continue with other keys. | WARN |
+| `store.Get(key)` fails (permission, decryption, transport) | Append to `Errors`, continue with other keys. | WARN |
 | Key value is empty | Append to `Skipped`, do not call `os.Setenv`. | WARN |
 
 **No backend failure brings down the supervisor.** Worst case: secrets
@@ -436,7 +502,7 @@ New file: `cmd/gc/cmd_supervisor_secret.go`.
 Reconciles three sources:
 
 1. Configured `keys` list in `supervisor.toml`.
-2. Items currently in the configured backend (via `Backend.Keys()`).
+2. Files currently present in `cfg.Age.Dir` (via `store.Keys()`).
 3. Env vars currently set in the *running supervisor* (queried via the new HTTP endpoint below).
 
 ```
@@ -463,14 +529,13 @@ New Huma-registered endpoint. Returns per-secret `{name, length, sha256}`. **Nev
 
 Per gascity's typed-wire invariant: response struct registered via `huma.Register` with typed Output; OpenAPI regeneration captures the new endpoint (`make dashboard-check`).
 
-### Backend lookup in CLI
+### Store lookup in CLI
 
 Each subcommand independently reads `supervisor.toml` and calls
-`secrets.Open(cfg.Secrets)` with the same config the supervisor uses. The CLI
-consumes the `Backend` interface only; it never imports an implementation type
-or platform-specific code path. **No coupling between CLI and running
-supervisor for backend access** — `gc supervisor secret set EXA_API_KEY` works
-whether the supervisor is up or down.
+`secrets.Open(cfg.Secrets)` with the same config the supervisor uses, getting
+back a `*secrets.Store`. **No coupling between CLI and running supervisor for
+store access** — `gc supervisor secret set EXA_API_KEY` works whether the
+supervisor is up or down.
 
 Sentinel errors used by the CLI: `secrets.ErrNotFound` (replaces the CGo
 branch's `keyring.ErrKeyNotFound`). The "delete is idempotent" path checks
@@ -480,7 +545,7 @@ branch's `keyring.ErrKeyNotFound`). The "delete is idempotent" path checks
 
 ### Unit tests (next to code, no build tag)
 
-`internal/supervisor/secrets/secrets_test.go` (driven by `ageBackend` in
+`internal/supervisor/secrets/secrets_test.go` (driven by `*Store` in
 `t.TempDir()` with `t.Setenv("GC_SECRETS_PASSPHRASE", "test-pass")`):
 
 | Test | Asserts |
@@ -489,23 +554,31 @@ branch's `keyring.ErrKeyNotFound`). The "delete is idempotent" path checks
 | `TestLoadAll_ExactMatch` | env var set, `Set = ["EXA_API_KEY"]`, `Missing` empty |
 | `TestLoadAll_MultipleKeys` | every configured key set independently |
 | `TestLoadAll_EmptyValueSkipped` | env var NOT set, item in `Skipped` |
-| `TestLoadAll_BackendOpenFails` | returns error, supervisor caller continues |
-| `TestLoadAll_ReservedKeyRejected` | validation error before any backend call |
+| `TestLoadAll_StoreOpenFails` | returns error, supervisor caller continues |
+| `TestLoadAll_ReservedKeyRejected` | validation error before any store call |
 | `TestReload_AddedUpdatedRemoved` | `ReloadResult` populated correctly; `os.Unsetenv` called for removed |
 | `TestReload_Idempotent` | second call's `Added/Updated/Removed` all empty |
 
-`internal/supervisor/secrets/age_test.go`:
+`internal/supervisor/secrets/store_test.go`:
 
 | Test | Asserts |
 |---|---|
-| `TestAge_RoundTrip` | Set + Get returns same bytes; file mode 0600; stamp file created on first Set |
-| `TestAge_GetMissing` | returns `ErrNotFound` |
-| `TestAge_RemoveIdempotent` | Remove on missing key returns nil |
-| `TestAge_KeysFiltersTmpAndStamp` | `*.age` filter excludes `.age.tmp` files and `.gc-secrets-stamp.age` |
-| `TestAge_TmpFileIgnoredOnGet` | a stale `.age.tmp` file does not satisfy `Get` for that key |
-| `TestAge_OpenWithWrongPassphraseFailsAtStamp` | stamp verification fails fast with the documented "passphrase does not match" message; no per-secret decryption attempted |
-| `TestAge_ConcurrentSetDifferentKeys` | parallel `Set` of different keys both succeed; both files present |
-| `TestAge_AtomicRenameOnCrash` | simulated crash mid-write (delete process before rename) leaves no half-encrypted `.age` file; `.tmp` is ignored |
+| `TestStore_RoundTrip` | Set + Get returns same bytes; file mode 0600; stamp file created at Open on empty dir |
+| `TestStore_GetMissing` | returns `ErrNotFound` |
+| `TestStore_RemoveIdempotent` | Remove on missing key returns nil |
+| `TestStore_KeysFiltersTmpAndStamp` | `*.age` filter excludes `*.age.tmp` files and `.gc-secrets-stamp-v0.age` |
+| `TestStore_TmpFileIgnoredOnGet` | a stale `.age.tmp` file does not satisfy `Get` for that key |
+| `TestStore_OpenWithWrongPassphraseFailsAtStamp` | stamp verification fails fast with the documented "passphrase does not match" message; no per-secret decryption attempted |
+| `TestStore_OpenStampDeletedNonEmptyStoreRejected` | stamp file deleted but `*.age` files remain → hard error per the Open() invariants matrix; refuses to write a fresh stamp |
+| `TestStore_OpenStampEagerlyWrittenOnEmptyDir` | empty dir + first Open() → stamp written immediately, before any Set |
+| `TestStore_StaleTmpSweptAtOpen` | seed a `.age.tmp` with mtime 10min in the past → Open() removes it; mtime 1min in the past → Open() leaves it (in-flight write) |
+| `TestStore_ConcurrentSetDifferentKeys` | parallel `Set` of different keys both succeed; both files present |
+| `TestStore_StampFormatStringIsConstant` | the plaintext `gc-supervisor-secrets-stamp-v0\n` is a `const`; the test names that constant explicitly to flag any future commit that changes it |
+
+(Note: `TestStore_AtomicRenameOnCrash` from the previous spec draft is dropped
+— simulating a crash mid-write reliably from a unit test requires a
+subprocess; if we want that coverage it lives in the integration tier, not
+here.)
 
 `internal/supervisor/secrets/passphrase_test.go`:
 
@@ -513,9 +586,13 @@ branch's `keyring.ErrKeyNotFound`). The "delete is idempotent" path checks
 |---|---|
 | `TestPassphrase_EnvWins` | env set + keyfile present → env value used |
 | `TestPassphrase_KeyfileWhenEnvUnset` | env unset, 0600 keyfile present → keyfile content used (one trailing `\n` stripped if present) |
+| `TestPassphrase_KeyfileSymlinkRejected` | symlinked keyfile → hard error, target not read (uses `os.Lstat`) |
+| `TestPassphrase_KeyfileWrongOwnerRejected` | keyfile with foreign UID → hard error |
 | `TestPassphrase_KeyfileWorldReadableRejected` | mode 0644 keyfile → hard error at Open, not auto-fixed |
 | `TestPassphrase_KeyfileGroupReadableRejected` | mode 0640 keyfile → hard error |
 | `TestPassphrase_KeychainBootstrap` (cmdRunner fake; `runtime.GOOS` test hook set to `"darwin"`) | env unset, no keyfile, runner returns passphrase → that value used |
+| `TestPassphrase_KeychainBootstrapEmptyStringRejected` | runner returns exit 0 + empty stdout → ERROR logged, fall through; empty string never used as passphrase |
+| `TestPassphrase_KeychainBootstrapTimeout` | runner blocks longer than 5s → context cancellation, WARN logged, fall through |
 | `TestPassphrase_KeychainBootstrapExit44` | runner returns exit 44 → fall through to TTY/error |
 | `TestPassphrase_NonTTYNoSourcesFails` | env unset, no keyfile, no Keychain, no TTY → clear documented error message |
 
@@ -523,13 +600,12 @@ branch's `keyring.ErrKeyNotFound`). The "delete is idempotent" path checks
 
 | Test | Asserts |
 |---|---|
-| `TestSecretsConfig_Validate_UnsupportedBackend` | `backend = "keychain"` → error pointing to CGo branch |
-| `TestSecretsConfig_Validate_AgeAccepted` | `backend = ""` and `backend = "age"` both pass |
 | `TestSecretsConfig_Validate_KeyShape` | non-uppercase / hyphen-bearing key rejected |
 | `TestSecretsConfig_Validate_ReservedKey` | `PATH`, `HOME`, etc. rejected |
+| `TestLoadConfig_RejectsUnknownSecretsSection` | `[secrets.keychain]` in TOML → strict-decode error pointing to migration guide |
 
 CLI tests (`cmd/gc/cmd_supervisor_secret_test.go`) cover each subcommand using
-the real `ageBackend` in `t.TempDir()` (passphrase from `t.Setenv`). Includes:
+a real `*Store` in `t.TempDir()` (passphrase from `t.Setenv`). Includes:
 
 | Test | Asserts |
 |---|---|
@@ -563,13 +639,29 @@ Most ergonomic path: seed the passphrase into macOS Keychain so gc never
 prompts on a cleanly-rebooted machine.
 
 ```bash
-# Reads the passphrase from your terminal, NOT argv. Run interactively.
+# Trailing -w (with NO value after it) triggers security's interactive
+# twin-prompt. Without -w, security creates an empty-password item silently —
+# do not omit -w.
 security add-generic-password -U \
   -s gc-supervisor-passphrase \
   -a "$USER@personal" \
-  -T ""    # empty trusted-app list — every gc rebuild prompts once, then silent until next rebuild
-# (no -w on argv → security reads password from the prompt, no process-table leak)
+  -T "" \
+  -w
+# security prompts: "password for new item:" — type your passphrase
+# security prompts: "retype password for new item:" — type it again
 ```
+
+Verify it took:
+
+```bash
+security find-generic-password -s gc-supervisor-passphrase -a "$USER@personal" -w
+# should print your passphrase to stdout (Keychain may prompt for unlock)
+```
+
+If you accidentally seeded an empty-password item (no `-w`, or hit Enter
+twice at the prompt), gc detects this at startup and refuses with a clear
+ERROR pointing back at this section. Re-seed by repeating the
+`add-generic-password -U` command above (the `-U` upserts).
 
 Alternative for headless / Linux daily-driver: keyfile.
 
@@ -617,10 +709,23 @@ For new users post-merge: just steps 2-3-4. No wrapper, no plist patch.
 ### Switching from the CGo branch to this branch
 
 Different products, not migration-compatible: the CGo branch stores secrets as
-individual macOS Keychain items; this branch stores them as
-age-encrypted files under `~/.gc/secrets/`. A user moving between branches
-must re-run `gc supervisor secret set` for each key. The TOML schema also
-differs (`[secrets.age]` only on this branch; no `[secrets.keychain]` section).
+individual macOS Keychain items; this branch stores them as age-encrypted
+files under `~/.gc/secrets/`. A user moving between branches must:
+
+```bash
+# Step 0: edit ~/.gc/supervisor.toml and remove these stale sections from
+# the CGo branch's schema. The age branch's TOML decoder runs in strict mode
+# and rejects unknown sections with a clear error pointing to this guide.
+#   [secrets.keychain]
+#   [secrets.file]
+# Replace with [secrets.age] (see "Per-secret migration" below).
+
+# Step 1: seed the macOS-Keychain bootstrap passphrase (see above).
+
+# Step 2: re-run 'gc supervisor secret set' for each key — values are not
+# transferable between the two branches' on-disk formats.
+```
+
 This is by design — the parallel branches are alternatives, not equivalents.
 
 ## Rollout / PR strategy
@@ -630,10 +735,10 @@ This is by design — the parallel branches are alternatives, not equivalents.
 3. **Atomic commits** (per AGENTS.md conventional commits) for the diff against the CGo branch:
    - `docs(supervisor): pivot supervisor-secrets-v0 to age-only design` (already committed at 769b156f → updated by a follow-up adversarial-fix commit)
    - `revert(release): drop goreleaser-cross switch and CGO_ENABLED=1`
-   - `feat(supervisor/secrets): add Backend interface and ErrNotFound sentinel`
-   - `feat(supervisor/secrets): add age backend with stamp-file passphrase verification`
-   - `feat(supervisor/secrets): add passphrase resolution chain (env → keyfile → macOS Keychain → TTY)`
-   - `refactor(supervisor/secrets): replace 99designs/keyring with internal Backend at call sites`
+   - `feat(supervisor/secrets): add Store + ErrNotFound sentinel (no Backend interface — single concrete type per AGENTS.md)`
+   - `feat(supervisor/secrets): age Store with stamp-file passphrase verification + .tmp sweep`
+   - `feat(supervisor/secrets): passphrase resolution chain (env → keyfile → macOS Keychain → TTY) with timeout + Lstat`
+   - `refactor(supervisor/secrets): replace 99designs/keyring with *secrets.Store at call sites; delete keyring.go and friends`
    - `refactor(supervisor): SecretsConfig schema — drop KeychainBackendConfig, rename file → age, prefixes → keys`
    - `feat(cli): overwrite confirmation in 'gc supervisor secret set'`
    - `chore(deps): drop github.com/99designs/keyring dependency`
