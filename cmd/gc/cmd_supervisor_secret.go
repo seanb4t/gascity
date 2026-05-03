@@ -62,7 +62,7 @@ func newSupervisorSecretSetCmd(stdout, stderr io.Writer) *cobra.Command {
 			// Overwrite confirmation. --from-stdin always proceeds because the
 			// caller is non-interactive.
 			if !force && !fromStdin {
-				if _, err := store.Get(name); err == nil {
+				if _, err := store.Get(name); !isNotFoundErr(err) {
 					if !confirm(c.InOrStdin(), stdout, fmt.Sprintf("Secret %q already exists. Overwrite? (y/N): ", name)) {
 						return nil
 					}

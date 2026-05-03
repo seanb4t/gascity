@@ -348,3 +348,57 @@ func TestSecretList_DriftDetection(t *testing.T) {
 		}
 	}
 }
+
+func TestSet_PromptsOnUnreadableExistingKey(t *testing.T) {
+	// File-exists-but-unreadable case: plant a corrupt .age file alongside a
+	// valid stamp (so Open succeeds), then attempt to set the key. Get returns
+	// a non-ErrNotFound error (decryption failure). The prompt MUST still fire;
+	// silent overwrite would destroy the original.
+	dir := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(secrets.EnvPassphraseVar, "first-pass")
+
+	// Open an empty store so verifyOrInitStamp writes a valid stamp.
+	ageCfg := supervisor.AgeBackendConfig{Dir: dir, Keys: []string{"OTHER_KEY"}}
+	store, err := secrets.Open(ageCfg)
+	if err != nil {
+		t.Fatalf("Open (stamp init): %v", err)
+	}
+	// Discard store — we only needed it to write the stamp.
+	_ = store
+
+	// Now drop a corrupt .age file; Open will find the stamp and proceed past
+	// stamp verification, then Get("OTHER_KEY") will fail with a decryption error.
+	corruptPath := filepath.Join(dir, "OTHER_KEY.age")
+	if err := os.WriteFile(corruptPath, []byte("not-valid-age-ciphertext"), 0o600); err != nil {
+		t.Fatalf("write corrupt: %v", err)
+	}
+
+	cfg := supervisor.Config{
+		Secrets: supervisor.SecretsConfig{
+			Age: ageCfg,
+		},
+	}
+	writeSupervisorTOMLForStore(t, cfg)
+
+	stdin := strings.NewReader("n\n")
+	stdout := &bytes.Buffer{}
+	cmd := newSupervisorSecretSetCmd(stdout, io.Discard)
+	cmd.SetIn(stdin)
+	cmd.SetArgs([]string{"OTHER_KEY"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	// Prompt must have fired (we sent "n", so "Overwrite?" must appear in stdout).
+	if !strings.Contains(stdout.String(), "Overwrite?") {
+		t.Fatalf("prompt must fire when key exists-but-unreadable; stdout=%q", stdout.String())
+	}
+	// The corrupt file must be unchanged (user declined).
+	got, err := os.ReadFile(corruptPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "not-valid-age-ciphertext" {
+		t.Fatalf("declined overwrite must preserve file; got %q", got)
+	}
+}
