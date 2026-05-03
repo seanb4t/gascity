@@ -48,8 +48,11 @@ var tmpSweepAge = 5 * time.Minute
 
 // Set encrypts value with the store's passphrase and writes <key>.age
 // atomically (write to <key>.age.tmp, fsync, rename). Concurrent Set
-// of distinct keys is safe; concurrent Set of the same key has
-// last-writer-wins semantics with no half-written file ever observable.
+// of distinct keys is safe via per-file atomic rename. Concurrent Set
+// of the SAME key is NOT safe — both writes share the <key>.age.tmp
+// path and can corrupt each other before rename; callers must
+// serialize Set on the same key. Readers never observe a partially-
+// renamed file because Rename is atomic.
 func (s *Store) Set(key string, value []byte) error {
 	rec, err := age.NewScryptRecipient(s.passphrase)
 	if err != nil {
@@ -99,7 +102,7 @@ func (s *Store) Get(key string) ([]byte, error) {
 	path := filepath.Join(s.dir, key+ageSuffix)
 	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("open %s: %w", path, err)
