@@ -304,12 +304,6 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Load secrets into the gc start process env before the supervisor
-	// registration flow. The supervisor loads secrets independently at its
-	// own startup; both processes call LoadAll so each has keyring secrets
-	// available in os.Environ() for any env-expansion that occurs in their
-	// respective pipelines.
-	loadStartupSecrets(context.Background(), stderr)
 	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
 		return code
 	}
@@ -1098,7 +1092,7 @@ func loadStartupSecrets(ctx context.Context, stderr io.Writer) {
 		fmt.Fprintf(stderr, "gc start: supervisor.toml: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	loader := supsecrets.NewLoader(secretsFilePromptFunc())
+	loader := supsecrets.NewLoader(supsecrets.EnvPasswordPromptFunc())
 	res, err := loader.LoadAll(ctx, supCfg.Secrets)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: secrets load failed: %v (continuing)\n", err) //nolint:errcheck // best-effort stderr

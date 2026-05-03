@@ -145,7 +145,7 @@ Implemented as `func (c SecretsConfig) Validate(reservedKey func(string) bool) e
 |---|---|
 | `Backend` not in allowed values (or empty → "auto") | `secrets.backend: unknown value %q` |
 | Prefix doesn't match env-var-name shape | `secrets.keychain.prefixes[%d]: not a valid env-var name`. **Reuse `supervisorServiceEnvNameRE` from `cmd_supervisor_lifecycle.go:381`** — promote it to a package-level export rather than duplicating the regex literal. |
-| Prefix shadows reserved env var | `secrets.keychain.prefixes[%d]: would shadow reserved env var %q`. Check against the union of `supervisorServiceFixedEnvKeys` (GC_HOME, PATH, XDG_RUNTIME_DIR — supervisor sets these itself) and `supervisorServiceEnvKeys` (HOME, USER, SHELL, LANG, etc. — auto-persist whitelist). Implementation: extract a single `IsReservedSupervisorEnvKey(name) bool` helper in `cmd/gc/cmd_supervisor_lifecycle.go` that consults both maps; call it from both the install path's existing checks and the new `SecretsConfig.Validate`. |
+| Prefix shadows reserved env var | `secrets.keychain.prefixes[%d]: would shadow reserved env var %q`. Check against the union of `supervisorServiceFixedEnvKeys` (GC_HOME, PATH, XDG_RUNTIME_DIR — supervisor sets these itself) and `supervisorServiceEnvKeys` (HOME, USER, SHELL, LANG, etc. — auto-persist whitelist). Implementation: extract a single `isReservedSupervisorEnvKey(name) bool` helper in `cmd/gc/cmd_supervisor_lifecycle.go` that consults both maps; call it from both the install path's existing checks and the new `SecretsConfig.Validate`. |
 | `backend = "file"` with empty `[secrets.file].dir` | `secrets.file.dir: required when backend = "file"` |
 
 ### Coexistence with `GC_SUPERVISOR_ENV`
@@ -204,6 +204,15 @@ Per-load:
 | Match has empty data | Append to `Skipped`, do not call `os.Setenv`. | WARN |
 
 **No Keychain failure brings down the supervisor.** Worst case: secrets unavailable; agents that need them fail when invoked, with a clear chain of evidence in `supervisor.log`.
+
+### Headless / non-TTY environments
+
+The encrypted file backend prompts for a password to unlock the
+keystore. In headless environments (CI, systemd-managed gc, container
+deployments), set `GC_SECRETS_FILE_PASSWORD` in the supervisor's
+environment. The file backend will read this env var instead of
+prompting. Other backends (keychain, secret-service, wincred) ignore
+it — they use OS-provided ACL/auth instead.
 
 ### `Reload` algorithm (full-sync)
 
